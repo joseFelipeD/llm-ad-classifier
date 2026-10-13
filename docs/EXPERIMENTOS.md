@@ -53,4 +53,29 @@ documentados do Groq (8K TPM / 200K TPD por modelo), a confirmar no painel da co
 
 ## Resultados
 
-_(vazio: aguardando autorização para chamadas de API)_
+### E0 — smoke test (2026-10-13, autorizado: 1 chamada)
+
+- Comando: `python scripts/smoke_test.py splits/fewshot_k3.jsonl --n 20 --out runs/e0`
+  (caminho real do pipeline, `max_retries=0`, bloqueio de uma segunda chamada).
+- Entrada: os 20 primeiros itens (por id) do pool `fewshot_k3`. Não toca no `dev_eval`.
+- Modelo `openai/gpt-oss-20b`, `--format json` (JSON Schema estrito), `reasoning_effort=low`,
+  `include_reasoning=false`, zero-shot, lote 20, `max_completion_tokens=2048`.
+- Resultado: 1 requisição HTTP, status 200, `finish_reason=stop`, JSON válido no schema,
+  20/20 itens com label válido, nenhuma retentativa.
+- `usage` real: `prompt_tokens=916`, `completion_tokens=364`, `total_tokens=1280`,
+  `completion_tokens_details.reasoning_tokens=177`. Média de **64,0 tokens/item**.
+- `usage_exact: true` (1 resposta com usage, 0 falhas de transporte).
+- Headers: `x-ratelimit-limit-requests=1000` (por dia), `x-ratelimit-limit-tokens=8000`
+  (por minuto). Isso confirma os limites documentados para esta conta.
+- `evaluate.py` sobre esses 20 itens: 20/20. **Não é estimativa de acurácia**: são só 20
+  itens do pool de exemplos, com classes desbalanceadas (food_beverage 1, fashion 2...).
+- Reasoning: 364 − 177 = 187 tokens visíveis, o que bate com o tamanho do JSON de 20
+  entradas. Isso indica que `reasoning_tokens` é um detalhamento **contido** em
+  `completion_tokens`, que é o único campo que somamos (sem contagem dupla). Inferência
+  pela aritmética; a documentação do Groq não declara isso explicitamente.
+- Arquivos locais, **não versionados** (`runs/` está no `.gitignore`):
+  `runs/e0_usage.json`, `runs/e0_response.json` (resposta bruta e headers de rate
+  limit), `runs/e0.jsonl`, `runs/e0_gold.jsonl`. Os números acima são o resumo desses
+  arquivos, e o comando acima os reproduz (com variação, porque o modelo não é
+  determinístico).
+- Decisão: `reasoning_effort=low` mantido como padrão; folga de ~6× no orçamento.

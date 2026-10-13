@@ -8,3 +8,6 @@ __pycache__/
 .claude/settings.local.json
 *.log
 .tmp/
+
+# resultados locais de experimentos (respostas brutas da API não são versionadas)
+runs/

@@ -1,7 +1,7 @@
 # DECISIONS
 
-> Documento em construção. Ainda **não há métricas medidas com API**: as seções de
-> acurácia e custo serão preenchidas só com números reais (`docs/EXPERIMENTOS.md`).
+> Documento em construção. Todos os números vêm de execuções reais registradas em
+> `docs/EXPERIMENTOS.md`. Holdout e teste oculto ainda não foram classificados.
 
 ## Nota sobre o histórico de commits
 
@@ -15,7 +15,35 @@ de desenvolvimento separadas no tempo.
 
 ## Acurácia e custo medidos
 
-Pendente. Nenhuma chamada de API foi feita até agora.
+Medido com `evaluate.py` no `splits/dev_eval.jsonl` (136 itens do treino que não aparecem
+como exemplo no prompt), uma execução por configuração:
+
+| configuração | acurácia | macro-F1 | tokens/item |
+|---|---|---|---|
+| E1: JSON Schema estrito, zero-shot, `low` | 98,5% (134/136) | 0,985 | 70,6 |
+| E2: texto `<n>\|<label>`, zero-shot, `low` | 97,8% (133/136) | 0,977 | 59,4 |
+
+Custo: soma do `usage` real de todas as respostas (`prompt_tokens + completion_tokens`);
+os `reasoning_tokens` já estão dentro de `completion_tokens` e não são somados de novo.
+A estimativa final virá do holdout (40 itens), medido uma única vez.
+
+## Configuração escolhida: JSON estrito, zero-shot, `reasoning_effort=low`
+
+- **JSON em vez de texto (E1 × E2):** a diferença de acurácia foi de 1 item, dentro do
+  ruído de uma execução não determinística. O texto economizou cerca de 11 tokens/item
+  (−16%), mas os dois ficam abaixo de 1/5 do orçamento de 400. O JSON Schema estrito
+  restringe os labels ao `enum` no próprio servidor; no formato texto, só o nosso parser
+  protege. Como a economia é irrelevante para o orçamento, ficamos com a garantia de
+  formato.
+- **`low`:** não houve resposta cortada nem erro atribuível a falta de raciocínio. Os
+  erros foram ambiguidades ("Película automotiva", que em espanhol significa filme, e
+  slogans sem produto explícito).
+- **Few-shot (E3/E4) considerado e não executado:** com 134/136 no E1, o ganho possível
+  é de 1–2 itens, indistinguível do ruído com 136 exemplos. Os pools sorteados não
+  têm exemplos do tipo dos erros (eletrônicos/acessórios veiculares), e escolher
+  exemplos de propósito para esses erros seria ajustar o prompt pelo `dev_eval`. O
+  custo seria um prompt maior (+25% a +70% de caracteres no prompt de sistema) e mais
+  complexidade. Nenhum resultado de few-shot foi medido.
 
 ## Provedor e arquitetura
 
@@ -69,8 +97,8 @@ O candidato aprovou todas. Situação de cada uma:
 | Não truncar textos longos | **implementada** | o texto vai integral; teste `test_long_text_is_not_truncated` |
 | Atalho determinístico só para texto vazio/espaços | **implementada** | `classifier/pipeline.py`; HTML continua indo ao LLM (teste) |
 | Reforçar a regra do `other` no prompt | **implementada** | descrição de `other` cita markup, placeholder e caracteres aleatórios, e proíbe usá-lo como "não sei" |
-| Testar texto demarcado vs JSON estrito | **implementada como opção** (`--format lines`) | parser próprio, testado; comparação de tokens pendente (E1 vs E2) |
-| Few-shot 1 vs 3 por classe | **infraestrutura pronta** (`--examples`, `fewshot_k1/k3`) | experimento pendente (E3/E4) |
+| Testar texto demarcado vs JSON estrito | **implementada e medida** (E1 × E2) | acurácia equivalente; −16% de tokens no texto; mantido JSON pela garantia de formato |
+| Few-shot 1 vs 3 por classe | **infraestrutura pronta, não executada** (`--examples`) | E3/E4 descartados pelo candidato após o E1 (ver "Configuração escolhida") |
 | Captura de `other` | **adaptada** (ver conflito 1) | `synthetic/other_sanity.jsonl`; experimento pendente (E5) |
 | Experimento de truncamento | **não executado** (ver conflito 3) | — |
 

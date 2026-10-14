@@ -69,6 +69,7 @@ A estimativa final virá do holdout (40 itens), medido uma única vez.
 | JSON malformado, label inválido, item ausente ou conflitante | só os itens sem label válido são reenviados; um lote sem nada aproveitável é dividido ao meio; item isolado: 2 tentativas |
 | 429 / 408 / 5xx / timeout / erro de rede ou de leitura (SSL, `IncompleteRead`) | o cliente repete até 4 vezes (`retry-after` ou backoff exponencial, teto de 60 s); se esgotar, o lote vira falha, sem multiplicar chamadas |
 | `retry-after` maior que 60 s (ex.: cota diária) | desiste na hora, em vez de gastar as tentativas |
+| risco de passar do limite de tokens por minuto | antes de cada chamada, estima o consumo (chamada anterior + 20%) e espera se: (a) a janela local de 60 s passaria de `--tpm-limit` (padrão 6000), ou (b) o servidor informou (`x-ratelimit-remaining-tokens`/`-reset-tokens`) menos tokens restantes que a estimativa. Headers ausentes ou inválidos são ignorados. Como é uma estimativa, não há garantia absoluta; um 429 continua tratado por retry-after/backoff. Motivo: no E2, o controle só local deixou o servidor com 206 tokens restantes |
 | 400 (ex.: validação de JSON) | tratado como resposta ruim: divide o lote e tenta de novo |
 | 4 chamadas seguidas com erro de API, sem nenhuma resposta aproveitável | aborta (código 2), em vez de repetir a falha em todos os lotes (circuit breaker) |
 | 401 / 403 / 404 | aborta tudo (código 2) |

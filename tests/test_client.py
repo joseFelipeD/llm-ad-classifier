@@ -173,6 +173,16 @@ class FakeClock:
         self.now += seconds
 
 
+def response_with_headers(remaining=None, reset=None, usage=None):
+    resp = ok_response("ok", usage=usage or {"prompt_tokens": 900, "completion_tokens": 100})
+    resp.headers = Message()
+    if remaining is not None:
+        resp.headers["x-ratelimit-remaining-tokens"] = str(remaining)
+    if reset is not None:
+        resp.headers["x-ratelimit-reset-tokens"] = reset
+    return resp
+
+
 class PacingBudgetLogTest(unittest.TestCase):
     def make(self, n_responses, **kw):
         clock = FakeClock()
@@ -182,7 +192,7 @@ class PacingBudgetLogTest(unittest.TestCase):
         return client, clock, fake
 
     def test_tpm_pacing_waits_for_window(self):
-        client, clock, _ = self.make(5, tpm_limit=4000)
+        client, clock, _ = self.make(5, tpm_limit=4000, safety_margin=0)
         for _ in range(5):
             client.complete([])
         # 3 chamadas (3900) cabem no minuto; a 4ª esperaria 5200 > 4000
@@ -195,6 +205,13 @@ class PacingBudgetLogTest(unittest.TestCase):
         for _ in range(5):
             client.complete([])
         self.assertEqual(clock.sleeps, [])
+
+    def test_safety_margin_makes_local_pacing_more_conservative(self):
+        client, clock, _ = self.make(3, tpm_limit=4000, safety_margin=0.2)
+        for _ in range(3):
+            client.complete([])
+        # 2600 usados + 1560 estimados (1300 * 1.2) > 4000: espera antes da 3ª
+        self.assertEqual(len(clock.sleeps), 1)
 
     def test_token_budget_stops_before_exceeding(self):
         client, _, fake = self.make(5, token_budget=3000)
@@ -218,6 +235,65 @@ class PacingBudgetLogTest(unittest.TestCase):
         self.assertEqual((calls[1]["prompt_tokens"], calls[1]["reasoning_tokens"]), (9, 3))
         self.assertEqual(client.meter.reasoning_tokens, 3)
         self.assertEqual(client.meter.output_tokens, 5)  # reasoning não somado de novo
+
+
+class ServerHeadersTest(unittest.TestCase):
+    def run_two(self, first, second=None, advance=0.0, **kw):
+        clock = FakeClock()
+        fake = FakeUrlopen(first, second or response_with_headers())
+        client = GroqClient("sk-test", "m", urlopen=fake, sleep=clock.sleep, clock=clock, **kw)
+        client.complete([])            # 1000 tokens -> próxima estimada em 1200
+        clock.now += advance
+        client.complete([])
+        return clock.sleeps
+
+    def test_low_remaining_waits_for_reset(self):
+        self.assertEqual(self.run_two(response_with_headers(remaining=206, reset="7.5s")), [8.0])
+
+    def test_enough_remaining_does_not_wait(self):
+        self.assertEqual(self.run_two(response_with_headers(remaining=5000, reset="7.5s")), [])
+
+    def test_margin_counts_against_remaining(self):
+        # 1100 restantes cobririam os 1000 da chamada anterior, mas não os 1200 estimados
+        self.assertEqual(self.run_two(response_with_headers(remaining=1100, reset="2s")), [2.5])
+
+    def test_stale_server_state_is_ignored(self):
+        self.assertEqual(self.run_two(response_with_headers(remaining=10, reset="3s"), advance=5), [])
+
+    def test_invalid_or_missing_headers_are_ignored(self):
+        for remaining, reset in [("abc", "2s"), (-5, "2s"), (10, "soon"), (10, "nans"), (10, None), (None, "2s")]:
+            self.assertEqual(self.run_two(response_with_headers(remaining=remaining, reset=reset)), [],
+                             (remaining, reset))
+
+    def test_wait_is_capped(self):
+        sleeps = self.run_two(response_with_headers(remaining=0, reset="5m"), max_backoff=60)
+        self.assertEqual(sleeps, [60])
+
+    def test_most_restrictive_applies(self):
+        # local: 1000 + 1200 <= 4000 não espera; servidor: 50 restantes -> espera o reset
+        sleeps = self.run_two(response_with_headers(remaining=50, reset="1.5s"), tpm_limit=4000)
+        self.assertEqual(sleeps, [2.0])
+
+    def test_headers_from_429_are_used_and_retry_after_kept(self):
+        err = http_error(429, retry_after=3)
+        err.headers["x-ratelimit-remaining-tokens"] = "0"
+        err.headers["x-ratelimit-reset-tokens"] = "10s"
+        clock = FakeClock()
+        fake = FakeUrlopen(response_with_headers(), err, response_with_headers())
+        client = GroqClient("sk-test", "m", urlopen=fake, sleep=clock.sleep, clock=clock)
+        client.complete([])
+        client.complete([])
+        # retry-after (3 s) do 429, depois o reset informado (10 - 3 + 0.5)
+        self.assertEqual(clock.sleeps, [3.0, 7.5])
+
+    def test_parse_duration(self):
+        from classifier.client import _parse_duration
+        self.assertAlmostEqual(_parse_duration("8.07s"), 8.07)
+        self.assertAlmostEqual(_parse_duration("1m26.4s"), 86.4)
+        self.assertAlmostEqual(_parse_duration("250ms"), 0.25)
+        self.assertAlmostEqual(_parse_duration("1h"), 3600)
+        for bad in ("", "  ", "abc", "5", "5x", "-1s", None, 3):
+            self.assertIsNone(_parse_duration(bad), bad)
 
 
 if __name__ == "__main__":

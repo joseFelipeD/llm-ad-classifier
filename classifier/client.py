@@ -9,6 +9,7 @@ import http.client
 import json
 import logging
 import math
+import re
 import time
 import urllib.error
 import urllib.request
@@ -75,14 +76,23 @@ class UsageMeter:
 
 
 class GroqClient:
-    """`tpm_limit`: espera antes de uma chamada que faria os tokens dos últimos 60 s
-    passarem do limite (estimando a próxima chamada pelo tamanho da anterior).
-    `token_budget`: teto de tokens da execução; a chamada que o ultrapassaria (pela
-    mesma estimativa) não é feita e vira erro fatal."""
+    """Controle de consumo, sempre baseado numa ESTIMATIVA da próxima chamada (o
+    tamanho da anterior + `safety_margin`), porque o consumo real só é conhecido
+    depois da resposta:
+    - `tpm_limit`: espera se os tokens dos últimos 60 s (contados localmente) mais a
+      estimativa passarem do limite;
+    - headers `x-ratelimit-remaining-tokens`/`-reset-tokens` (estado informado pelo
+      servidor, que também enxerga outros processos): se o restante for menor que a
+      estimativa, espera o reset. Headers ausentes ou inválidos são ignorados e vale
+      só o controle local; vale o mais restritivo dos dois;
+    - `token_budget`: a chamada cuja estimativa passaria do teto não é feita (erro
+      fatal). É um teto best-effort: uma chamada maior que a estimada pode ultrapassá-lo.
+    O 429 continua tratado por retry-after/backoff."""
 
     def __init__(self, api_key, model, *, meter=None, base_url=DEFAULT_BASE_URL, timeout=60.0,
                  max_retries=4, backoff=2.0, max_backoff=60.0, tpm_limit=None, token_budget=None,
-                 urlopen=urllib.request.urlopen, sleep=time.sleep, clock=time.monotonic):
+                 safety_margin=0.2, urlopen=urllib.request.urlopen, sleep=time.sleep,
+                 clock=time.monotonic):
         self.api_key = api_key
         self.model = model
         self.meter = meter or UsageMeter()
@@ -93,11 +103,13 @@ class GroqClient:
         self.max_backoff = max_backoff
         self.tpm_limit = tpm_limit
         self.token_budget = token_budget
+        self.safety_margin = safety_margin
         self._urlopen = urlopen
         self._sleep = sleep
         self._clock = clock
         self._window = deque()      # (instante, tokens) das respostas recentes
-        self._last_tokens = 0       # tamanho da última resposta, estimativa da próxima
+        self._last_tokens = 0       # tamanho da última resposta
+        self._server = None         # (tokens restantes, segundos até o reset, instante observado)
 
     def complete(self, messages, *, response_format=None, max_completion_tokens=None,
                  reasoning_effort=None):
@@ -142,6 +154,7 @@ class GroqClient:
                 headers = getattr(resp, "headers", None)
         except urllib.error.HTTPError as e:
             detail = self._redact(_error_detail(e))
+            self._observe(e.headers)
             self._log_call(started, e.code, error=detail, headers=e.headers)
             if e.code in _FATAL_STATUS:
                 raise ApiError(f"HTTP {e.code}: {detail}", status=e.code, fatal=True) from None
@@ -163,6 +176,7 @@ class GroqClient:
         self._window.append((self._clock(), tokens))
         if tokens:
             self._last_tokens = tokens
+        self._observe(headers)
         try:
             choice = data["choices"][0]
             content = choice["message"].get("content")
@@ -173,27 +187,47 @@ class GroqClient:
         self._log_call(started, 200, usage=usage, headers=headers, finish_reason=choice.get("finish_reason"))
         return Completion(content, choice.get("finish_reason"))
 
+    def _estimate(self):
+        return math.ceil(self._last_tokens * (1 + self.safety_margin))
+
     def _check_budget(self):
         if self.token_budget is None:
             return
-        if self.meter.total_tokens + self._last_tokens > self.token_budget:
+        estimate = self._estimate()
+        if self.meter.total_tokens + estimate > self.token_budget:
             raise ApiError(f"teto operacional de {self.token_budget} tokens: já usados "
-                           f"{self.meter.total_tokens}, próxima chamada estimada em {self._last_tokens}",
+                           f"{self.meter.total_tokens}, próxima chamada estimada em {estimate}",
                            fatal=True)
 
     def _pace(self):
-        if not self.tpm_limit:
-            return
-        while True:
+        estimate = self._estimate()
+        # 1) janela local de 60 s
+        while self.tpm_limit:
             now = self._clock()
             while self._window and now - self._window[0][0] >= 60:
                 self._window.popleft()
             used = sum(t for _, t in self._window)
-            if not self._window or used + self._last_tokens <= self.tpm_limit:
-                return
+            if not self._window or used + estimate <= self.tpm_limit:
+                break
             wait = 60 - (now - self._window[0][0]) + 0.5
-            log.info("ritmo: %d tokens no último minuto, aguardando %.1fs", used, wait)
+            log.info("ritmo local: %d tokens no último minuto, aguardando %.1fs", used, wait)
             self._sleep(wait)
+        # 2) estado informado pelo servidor (se houver e ainda for atual)
+        if self._server:
+            remaining, reset, observed = self._server
+            elapsed = self._clock() - observed
+            if elapsed < reset and remaining < estimate:
+                wait = min(reset - elapsed + 0.5, self.max_backoff)
+                log.info("ritmo servidor: %d tokens restantes < %d estimados, aguardando %.1fs",
+                         remaining, estimate, wait)
+                self._sleep(wait)
+            self._server = None  # depois de esperar (ou se já passou o reset), o dado é velho
+
+    def _observe(self, headers):
+        """Guarda remaining/reset de tokens se ambos forem válidos; senão, descarta."""
+        remaining = _parse_int(headers.get("x-ratelimit-remaining-tokens")) if headers else None
+        reset = _parse_duration(headers.get("x-ratelimit-reset-tokens")) if headers else None
+        self._server = (remaining, reset, self._clock()) if remaining is not None and reset is not None else None
 
     def _log_call(self, started, status, *, usage=None, error=None, headers=None, finish_reason=None):
         usage = usage if isinstance(usage, dict) else {}
@@ -207,6 +241,7 @@ class GroqClient:
             "reasoning_tokens": details.get("reasoning_tokens") if isinstance(details, dict) else None,
             "finish_reason": finish_reason,
             "remaining_tokens_minute": headers.get("x-ratelimit-remaining-tokens") if headers else None,
+            "reset_tokens": headers.get("x-ratelimit-reset-tokens") if headers else None,
             "remaining_requests_day": headers.get("x-ratelimit-remaining-requests") if headers else None,
             "retry_after": headers.get("retry-after") if headers else None,
             "error": error,
@@ -232,6 +267,31 @@ def _retry_after(http_error):
     except (TypeError, ValueError):
         return None
     return max(seconds, 0.0) if math.isfinite(seconds) else None
+
+
+def _parse_int(value):
+    """Inteiro não negativo, ou None."""
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
+
+
+_DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)(ms|h|m|s)")
+_UNIT_SECONDS = {"ms": 0.001, "s": 1, "m": 60, "h": 3600}
+
+
+def _parse_duration(value):
+    """Duração no formato do Groq ("8.07s", "1m26.4s", "250ms") em segundos, ou None."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    parts = _DURATION_RE.findall(text)
+    if not parts or "".join(n + u for n, u in parts) != text:
+        return None
+    seconds = sum(float(n) * _UNIT_SECONDS[u] for n, u in parts)
+    return seconds if math.isfinite(seconds) else None
 
 
 def _error_detail(http_error):

@@ -40,6 +40,7 @@ class Result:
     failures: dict = field(default_factory=dict)   # id -> motivo
     without_api: int = 0
     consecutive_errors: int = 0
+    problems: list = field(default_factory=list)   # um motivo por resposta/erro que deixou itens sem label
 
 
 def classify_items(items, client, settings=None):
@@ -96,6 +97,7 @@ def _classify_batch(batch, client, settings, result, attempt):
     missing = [it for idx, it in enumerate(batch, 1) if idx not in got]
     if not missing:
         return
+    result.problems.append(f"lote de {len(batch)}, {len(missing)} sem label: {reason}")
     log.warning("lote de %d: %d sem label válido (%s)", len(batch), len(missing), reason)
 
     if len(missing) < len(batch):

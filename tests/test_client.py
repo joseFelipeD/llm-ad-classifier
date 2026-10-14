@@ -160,5 +160,65 @@ class GroqClientTest(unittest.TestCase):
         self.assertNotIn("sk-test", str(ctx.exception))
 
 
+class FakeClock:
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps = []
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+class PacingBudgetLogTest(unittest.TestCase):
+    def make(self, n_responses, **kw):
+        clock = FakeClock()
+        usage = {"prompt_tokens": 900, "completion_tokens": 400}  # 1300 por chamada
+        fake = FakeUrlopen(*[ok_response("ok", usage=usage) for _ in range(n_responses)])
+        client = GroqClient("sk-test", "m", urlopen=fake, sleep=clock.sleep, clock=clock, **kw)
+        return client, clock, fake
+
+    def test_tpm_pacing_waits_for_window(self):
+        client, clock, _ = self.make(5, tpm_limit=4000)
+        for _ in range(5):
+            client.complete([])
+        # 3 chamadas (3900) cabem no minuto; a 4ª esperaria 5200 > 4000
+        self.assertEqual(len(clock.sleeps), 1)
+        self.assertAlmostEqual(clock.sleeps[0], 60.5)
+        self.assertEqual(client.meter.total_tokens, 6500)
+
+    def test_no_pacing_when_disabled(self):
+        client, clock, _ = self.make(5)
+        for _ in range(5):
+            client.complete([])
+        self.assertEqual(clock.sleeps, [])
+
+    def test_token_budget_stops_before_exceeding(self):
+        client, _, fake = self.make(5, token_budget=3000)
+        client.complete([])
+        client.complete([])            # 2600 usados
+        with self.assertRaises(ApiError) as ctx:
+            client.complete([])        # 2600 + 1300 estimado > 3000
+        self.assertTrue(ctx.exception.fatal)
+        self.assertEqual(len(fake.requests), 2)
+
+    def test_call_log_records_success_and_failure(self):
+        body = {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 9, "completion_tokens": 5,
+                          "completion_tokens_details": {"reasoning_tokens": 3}}}
+        fake = FakeUrlopen(http_error(429, retry_after=1), io.BytesIO(json.dumps(body).encode()))
+        client, _ = make_client(fake)
+        client.complete([])
+        calls = client.meter.calls
+        self.assertEqual([c["status"] for c in calls], [429, 200])
+        self.assertEqual(calls[0]["retry_after"], "1")
+        self.assertEqual((calls[1]["prompt_tokens"], calls[1]["reasoning_tokens"]), (9, 3))
+        self.assertEqual(client.meter.reasoning_tokens, 3)
+        self.assertEqual(client.meter.output_tokens, 5)  # reasoning não somado de novo
+
+
 if __name__ == "__main__":
     unittest.main()

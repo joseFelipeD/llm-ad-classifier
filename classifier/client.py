@@ -12,6 +12,7 @@ import math
 import time
 import urllib.error
 import urllib.request
+from collections import deque
 from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
@@ -48,14 +49,25 @@ class UsageMeter:
         self.http_attempts = 0
         self.responses_without_usage = 0
         self.transport_errors = 0
+        self.reasoning_tokens = 0   # informativo: já incluído em output_tokens
+        self.calls = []             # um registro por requisição HTTP (inclusive falhas)
+
+    @property
+    def total_tokens(self):
+        return self.input_tokens + self.output_tokens
 
     def record(self, usage):
+        """Soma o usage; devolve o total de tokens da resposta (0 se ausente)."""
         if isinstance(usage, dict) and isinstance(usage.get("prompt_tokens"), int) \
                 and isinstance(usage.get("completion_tokens"), int):
             self.input_tokens += usage["prompt_tokens"]
             self.output_tokens += usage["completion_tokens"]
-        else:
-            self.responses_without_usage += 1
+            details = usage.get("completion_tokens_details")
+            if isinstance(details, dict) and isinstance(details.get("reasoning_tokens"), int):
+                self.reasoning_tokens += details["reasoning_tokens"]
+            return usage["prompt_tokens"] + usage["completion_tokens"]
+        self.responses_without_usage += 1
+        return 0
 
     @property
     def exact(self):
@@ -63,9 +75,14 @@ class UsageMeter:
 
 
 class GroqClient:
+    """`tpm_limit`: espera antes de uma chamada que faria os tokens dos últimos 60 s
+    passarem do limite (estimando a próxima chamada pelo tamanho da anterior).
+    `token_budget`: teto de tokens da execução; a chamada que o ultrapassaria (pela
+    mesma estimativa) não é feita e vira erro fatal."""
+
     def __init__(self, api_key, model, *, meter=None, base_url=DEFAULT_BASE_URL, timeout=60.0,
-                 max_retries=4, backoff=2.0, max_backoff=60.0,
-                 urlopen=urllib.request.urlopen, sleep=time.sleep):
+                 max_retries=4, backoff=2.0, max_backoff=60.0, tpm_limit=None, token_budget=None,
+                 urlopen=urllib.request.urlopen, sleep=time.sleep, clock=time.monotonic):
         self.api_key = api_key
         self.model = model
         self.meter = meter or UsageMeter()
@@ -74,8 +91,13 @@ class GroqClient:
         self.max_retries = max_retries
         self.backoff = backoff
         self.max_backoff = max_backoff
+        self.tpm_limit = tpm_limit
+        self.token_budget = token_budget
         self._urlopen = urlopen
         self._sleep = sleep
+        self._clock = clock
+        self._window = deque()      # (instante, tokens) das respostas recentes
+        self._last_tokens = 0       # tamanho da última resposta, estimativa da próxima
 
     def complete(self, messages, *, response_format=None, max_completion_tokens=None,
                  reasoning_effort=None):
@@ -90,6 +112,8 @@ class GroqClient:
         body = json.dumps(payload).encode("utf-8")
 
         for attempt in range(self.max_retries + 1):
+            self._check_budget()
+            self._pace()
             try:
                 return self._send(body)
             except _Retry as r:
@@ -111,11 +135,14 @@ class GroqClient:
             "User-Agent": "classificador-anuncios/1.0",
         })
         self.meter.http_attempts += 1
+        started = self._clock()
         try:
             with self._urlopen(request, timeout=self.timeout) as resp:
                 raw = resp.read()
+                headers = getattr(resp, "headers", None)
         except urllib.error.HTTPError as e:
             detail = self._redact(_error_detail(e))
+            self._log_call(started, e.code, error=detail, headers=e.headers)
             if e.code in _FATAL_STATUS:
                 raise ApiError(f"HTTP {e.code}: {detail}", status=e.code, fatal=True) from None
             if e.code in _RETRY_STATUS:
@@ -124,19 +151,66 @@ class GroqClient:
         except (OSError, http.client.HTTPException) as e:
             # URLError, timeout, conexão resetada, SSL, IncompleteRead...
             self.meter.transport_errors += 1
+            self._log_call(started, None, error=f"{type(e).__name__}: {e}")
             raise _Retry(f"rede/timeout: {type(e).__name__}: {e}", None, None) from None
 
         try:
             data = json.loads(raw)
         except ValueError:
             data = None
-        self.meter.record(data.get("usage") if isinstance(data, dict) else None)
+        usage = data.get("usage") if isinstance(data, dict) else None
+        tokens = self.meter.record(usage)
+        self._window.append((self._clock(), tokens))
+        if tokens:
+            self._last_tokens = tokens
         try:
             choice = data["choices"][0]
             content = choice["message"].get("content")
         except (KeyError, IndexError, TypeError, AttributeError):
+            self._log_call(started, 200, usage=usage, error="corpo fora do formato chat/completions",
+                           headers=headers)
             raise ApiError("resposta HTTP 200 sem o formato chat/completions esperado") from None
+        self._log_call(started, 200, usage=usage, headers=headers, finish_reason=choice.get("finish_reason"))
         return Completion(content, choice.get("finish_reason"))
+
+    def _check_budget(self):
+        if self.token_budget is None:
+            return
+        if self.meter.total_tokens + self._last_tokens > self.token_budget:
+            raise ApiError(f"teto operacional de {self.token_budget} tokens: já usados "
+                           f"{self.meter.total_tokens}, próxima chamada estimada em {self._last_tokens}",
+                           fatal=True)
+
+    def _pace(self):
+        if not self.tpm_limit:
+            return
+        while True:
+            now = self._clock()
+            while self._window and now - self._window[0][0] >= 60:
+                self._window.popleft()
+            used = sum(t for _, t in self._window)
+            if not self._window or used + self._last_tokens <= self.tpm_limit:
+                return
+            wait = 60 - (now - self._window[0][0]) + 0.5
+            log.info("ritmo: %d tokens no último minuto, aguardando %.1fs", used, wait)
+            self._sleep(wait)
+
+    def _log_call(self, started, status, *, usage=None, error=None, headers=None, finish_reason=None):
+        usage = usage if isinstance(usage, dict) else {}
+        details = usage.get("completion_tokens_details")
+        self.meter.calls.append({
+            "n": self.meter.http_attempts,
+            "status": status,
+            "seconds": round(self._clock() - started, 3),
+            "prompt_tokens": usage.get("prompt_tokens"),
+            "completion_tokens": usage.get("completion_tokens"),
+            "reasoning_tokens": details.get("reasoning_tokens") if isinstance(details, dict) else None,
+            "finish_reason": finish_reason,
+            "remaining_tokens_minute": headers.get("x-ratelimit-remaining-tokens") if headers else None,
+            "remaining_requests_day": headers.get("x-ratelimit-remaining-requests") if headers else None,
+            "retry_after": headers.get("retry-after") if headers else None,
+            "error": error,
+        })
 
     def _redact(self, text):
         return text.replace(self.api_key, "***") if self.api_key else text

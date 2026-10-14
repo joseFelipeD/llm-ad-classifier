@@ -14,15 +14,17 @@ Códigos de saída:
     2  erro de entrada/configuração, erro fatal da API (ex.: 401) ou falhas seguidas
 """
 import argparse
+import hashlib
 import json
 import logging
 import os
 import sys
+import time
 
 from classifier.client import GroqClient, UsageMeter
 from classifier.dataset import InputError, load_examples, load_items
 from classifier.pipeline import Settings, classify_items
-from classifier.prompt import FORMATS
+from classifier.prompt import FORMATS, build_messages
 
 DEFAULT_MODEL = "openai/gpt-oss-20b"
 log = logging.getLogger("classify")
@@ -44,6 +46,11 @@ def parse_args(argv):
     p.add_argument("--usage", help="grava o consumo real de tokens neste arquivo JSON")
     p.add_argument("--failures", help="grava os itens sem label neste arquivo JSONL")
     p.add_argument("--partial", help="em execução incompleta, grava aqui as predições obtidas")
+    p.add_argument("--call-log", help="grava um registro JSONL por requisição HTTP (inclusive falhas)")
+    p.add_argument("--tpm-limit", type=int, default=6000,
+                   help="tokens por minuto a não ultrapassar (plano gratuito do Groq: 8000); 0 desliga")
+    p.add_argument("--max-total-tokens", type=int,
+                   help="teto operacional: não faz chamadas que levariam o total acima disto")
     return p.parse_args(argv)
 
 
@@ -59,7 +66,7 @@ def load_dotenv(path=".env"):
                 os.environ.setdefault(key.strip(), value.strip().strip("'\""))
 
 
-def build_usage(meter, n_items, model, settings, result, n_examples):
+def build_usage(meter, n_items, model, settings, result, n_examples, **extra):
     """Conteúdo de usage.json; `result` None significa execução abortada."""
     total = meter.input_tokens + meter.output_tokens
     return {
@@ -78,10 +85,14 @@ def build_usage(meter, n_items, model, settings, result, n_examples):
         "http_attempts": meter.http_attempts,
         "responses_without_usage": meter.responses_without_usage,
         "transport_errors": meter.transport_errors,
+        "reasoning_tokens_included_in_output": meter.reasoning_tokens,
+        "responses_with_problems": len(result.problems) if result else None,
         "output_format": settings.fmt,
         "batch_size": settings.batch_size,
         "reasoning_effort": settings.reasoning_effort,
+        "max_completion_tokens": settings.max_completion_tokens,
         "few_shot_examples": n_examples,
+        **extra,
     }
 
 
@@ -114,19 +125,28 @@ def main(argv=None, client_factory=GroqClient, stdout=None):
                         max_completion_tokens=args.max_completion_tokens, reasoning_effort=effort)
     meter = UsageMeter()
     client = client_factory(api_key, args.model, meter=meter, timeout=args.timeout,
-                            max_retries=args.max_retries)
+                            max_retries=args.max_retries, tpm_limit=args.tpm_limit or None,
+                            token_budget=args.max_total_tokens)
+    system_prompt = build_messages([], settings.fmt, examples)[0]["content"]
     log.info("%d itens, modelo %s, formato %s, lote %d, %d exemplos",
              len(items), args.model, args.format, args.batch_size, len(examples))
 
+    started = time.monotonic()
     try:
         result = classify_items(items, client, settings)
     except Exception as e:  # ApiError fatal ou qualquer erro inesperado: preserva o usage
         log.error("execução abortada: %s: %s", type(e).__name__, e)
-        _write_usage(args.usage, build_usage(meter, len(items), args.model, settings, None, len(examples)))
+        result = None
+    # usage e log de chamadas antes do stdout: os tokens gastos ficam registrados de qualquer forma.
+    _write_usage(args.usage, build_usage(
+        meter, len(items), args.model, settings, result, len(examples),
+        elapsed_seconds=round(time.monotonic() - started, 1),
+        system_prompt_sha256=hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()[:16]))
+    if args.call_log:
+        with open(args.call_log, "w", encoding="utf-8", newline="\n") as f:
+            write_jsonl(f, meter.calls)
+    if result is None:
         return 2
-
-    # usage e falhas antes do stdout: os tokens gastos ficam registrados de qualquer forma.
-    _write_usage(args.usage, build_usage(meter, len(items), args.model, settings, result, len(examples)))
     predictions = [{"id": it.id, "label": result.labels[it.id]} for it in items if it.id in result.labels]
     total = meter.input_tokens + meter.output_tokens
     log.info("tokens: %d entrada + %d saída = %d (média %.1f/item), %d requisições HTTP%s",

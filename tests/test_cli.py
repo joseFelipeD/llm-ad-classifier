@@ -36,6 +36,9 @@ class CliTest(unittest.TestCase):
         self.assertEqual((usage["input_tokens"], usage["output_tokens"]), (10, 1))
         self.assertEqual(usage["avg_tokens_per_item"], 5.5)
         self.assertTrue(usage["complete"])
+        self.assertEqual(usage["responses_with_problems"], 0)
+        self.assertEqual(len(usage["system_prompt_sha256"]), 16)
+        self.assertIn("elapsed_seconds", usage)
 
     def test_label_field_of_input_is_not_sent_to_model(self):
         seen = []

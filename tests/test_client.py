@@ -152,6 +152,45 @@ class GroqClientTest(unittest.TestCase):
             client.complete([])
         self.assertEqual((client.meter.input_tokens, client.meter.output_tokens), (5, 2))
 
+    def test_bool_or_negative_token_counts_are_rejected(self):
+        for usage in ({"prompt_tokens": True, "completion_tokens": 5},
+                      {"prompt_tokens": 10, "completion_tokens": -1},
+                      {"prompt_tokens": "10", "completion_tokens": 5}):
+            client, _ = make_client(FakeUrlopen(ok_response("ok", usage=usage)))
+            client.complete([])
+            self.assertEqual(client.meter.total_tokens, 0, usage)
+            self.assertFalse(client.meter.exact, usage)
+
+    def test_invalid_reasoning_detail_is_ignored(self):
+        usage = {"prompt_tokens": 10, "completion_tokens": 5, "completion_tokens_details": {"reasoning_tokens": 9}}
+        client, _ = make_client(FakeUrlopen(ok_response("ok", usage=usage)))
+        client.complete([])
+        self.assertEqual((client.meter.output_tokens, client.meter.reasoning_tokens), (5, 0))
+
+    def test_usage_in_error_body_is_counted(self):
+        body = json.dumps({"error": {"message": "json_validate_failed"},
+                           "usage": {"prompt_tokens": 50, "completion_tokens": 30}}).encode()
+        client, _ = make_client(FakeUrlopen(http_error(400, body=body)))
+        with self.assertRaises(ApiError):
+            client.complete([])
+        self.assertEqual(client.meter.total_tokens, 80)
+        self.assertTrue(client.meter.exact)
+
+    def test_error_without_usage_makes_count_inexact(self):
+        client, _ = make_client(FakeUrlopen(http_error(400)))
+        with self.assertRaises(ApiError):
+            client.complete([])
+        self.assertFalse(client.meter.exact)
+
+    def test_rejections_without_usage_keep_count_exact(self):
+        client, _ = make_client(FakeUrlopen(http_error(429, retry_after=1), ok_response("ok")))
+        client.complete([])
+        self.assertTrue(client.meter.exact)
+        client, _ = make_client(FakeUrlopen(http_error(401)))
+        with self.assertRaises(ApiError):
+            client.complete([])
+        self.assertTrue(client.meter.exact)
+
     def test_api_key_is_redacted_from_error_detail(self):
         err = http_error(400, body=b'{"error": {"message": "bad key sk-test here"}}')
         client, _ = make_client(FakeUrlopen(err))

@@ -21,6 +21,8 @@ log = logging.getLogger(__name__)
 DEFAULT_BASE_URL = "https://api.groq.com/openai/v1"
 _RETRY_STATUS = {408, 429, 500, 502, 503, 504}
 _FATAL_STATUS = {401, 403, 404}
+# Rejeições antes de gerar tokens: sem `usage`, o consumo é zero (não "desconhecido").
+_REJECTED_BEFORE_GENERATION = {401, 403, 404, 429}
 
 
 class ApiError(Exception):
@@ -40,8 +42,10 @@ class Completion:
 class UsageMeter:
     """Soma o `usage` de TODAS as respostas da API, inclusive as de retentativas.
 
-    Nada é estimado: respostas sem `usage` e falhas de transporte (em que o servidor
-    pode ter processado o pedido) são apenas contadas, e tornam a soma não exata.
+    Nada é estimado: respostas cujo consumo é desconhecido (200 sem `usage` válido,
+    erros 400/408/422/5xx sem `usage`) e falhas de transporte (em que o servidor pode ter
+    processado o pedido) são apenas contadas, e tornam a soma não exata. 429/401/403/404
+    sem `usage` são rejeições antes da geração e não contam como consumo desconhecido.
     """
 
     def __init__(self):
@@ -58,17 +62,20 @@ class UsageMeter:
         return self.input_tokens + self.output_tokens
 
     def record(self, usage):
-        """Soma o usage; devolve o total de tokens da resposta (0 se ausente)."""
-        if isinstance(usage, dict) and isinstance(usage.get("prompt_tokens"), int) \
-                and isinstance(usage.get("completion_tokens"), int):
-            self.input_tokens += usage["prompt_tokens"]
-            self.output_tokens += usage["completion_tokens"]
-            details = usage.get("completion_tokens_details")
-            if isinstance(details, dict) and isinstance(details.get("reasoning_tokens"), int):
-                self.reasoning_tokens += details["reasoning_tokens"]
-            return usage["prompt_tokens"] + usage["completion_tokens"]
-        self.responses_without_usage += 1
-        return 0
+        """Soma o usage; devolve o total de tokens da resposta (0 se ausente/inválido)."""
+        usage = usage if isinstance(usage, dict) else {}
+        prompt = _token_count(usage.get("prompt_tokens"))
+        completion = _token_count(usage.get("completion_tokens"))
+        if prompt is None or completion is None:
+            self.responses_without_usage += 1
+            return 0
+        self.input_tokens += prompt
+        self.output_tokens += completion
+        details = usage.get("completion_tokens_details")
+        reasoning = _token_count(details.get("reasoning_tokens")) if isinstance(details, dict) else None
+        if reasoning is not None and reasoning <= completion:
+            self.reasoning_tokens += reasoning
+        return prompt + completion
 
     @property
     def exact(self):
@@ -153,9 +160,14 @@ class GroqClient:
                 raw = resp.read()
                 headers = getattr(resp, "headers", None)
         except urllib.error.HTTPError as e:
-            detail = self._redact(_error_detail(e))
+            message, body = _error_body(e)
+            detail = self._redact(message)
+            usage = body.get("usage") if isinstance(body, dict) else None
+            if usage is not None or e.code not in _REJECTED_BEFORE_GENERATION:
+                # usage válido soma (e conta na janela de TPM); ausente/inválido = consumo desconhecido
+                self._window.append((self._clock(), self.meter.record(usage)))
             self._observe(e.headers)
-            self._log_call(started, e.code, error=detail, headers=e.headers)
+            self._log_call(started, e.code, usage=usage, error=detail, headers=e.headers)
             if e.code in _FATAL_STATUS:
                 raise ApiError(f"HTTP {e.code}: {detail}", status=e.code, fatal=True) from None
             if e.code in _RETRY_STATUS:
@@ -294,9 +306,21 @@ def _parse_duration(value):
     return seconds if math.isfinite(seconds) else None
 
 
-def _error_detail(http_error):
+def _token_count(value):
+    """Contagem de tokens válida (int não negativo, não bool), ou None."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _error_body(http_error):
+    """(mensagem curta, corpo JSON ou None) de uma resposta de erro HTTP."""
     try:
-        body = http_error.read().decode("utf-8", "replace")
-        return json.loads(body).get("error", {}).get("message", body)[:300]
+        text = http_error.read().decode("utf-8", "replace")
     except Exception:
-        return str(http_error.reason)[:300]
+        return str(http_error.reason)[:300], None
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return text[:300] or str(http_error.reason)[:300], None
+    error = data.get("error") if isinstance(data, dict) else None
+    message = error.get("message") if isinstance(error, dict) else None
+    return str(message or text)[:300], data

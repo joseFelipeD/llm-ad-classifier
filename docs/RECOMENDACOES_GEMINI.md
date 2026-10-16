@@ -4,6 +4,12 @@ Origem: revisão independente realizada com Google Gemini.
 
 Status: recomendações aprovadas pelo desenvolvedor.
 
+> Nota posterior: este é o registro da revisão, feito antes dos experimentos. Nem tudo foi
+> aplicado como sugerido: os experimentos de few-shot não foram executados, as variantes
+> foram comparadas no `dev_eval` (não no holdout), o teste de `other` usou entradas
+> sintéticas em vez de itens do teste e o truncamento foi descartado. O que
+> foi feito com cada recomendação está em `DECISIONS.md` e `docs/EXPERIMENTOS.md`.
+
 Objetivo: orientar melhorias na implementação do
 classificador de anúncios.
 

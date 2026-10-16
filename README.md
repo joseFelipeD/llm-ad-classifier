@@ -110,6 +110,23 @@ Nenhuma falha vira rótulo silenciosamente.
 | entrada inválida (JSON, id ausente ou duplicado, sem `text`) ou argumento inválido | aborta antes de chamar a API (exit 2) |
 | consumo de tokens desconhecido (resposta sem `usage`, timeout, erro 400/5xx sem `usage`) | não é estimado; `usage_exact: false` no `usage.json` |
 
+## Limitações conhecidas
+
+- **`usage_exact: false`** significa que o consumo total efetivo **não pôde ser
+  comprovado**: alguma resposta veio sem `usage` válido, ou houve timeout ou erro de rede
+  (o servidor pode ter processado o pedido). A soma reportada é então um piso, não o
+  total.
+- **401/403/404/429 sem `usage` são contados como consumo zero.** É uma convenção
+  operacional (rejeições antes da geração); a API não confirma isso explicitamente.
+- **Rate limit com reset longo:** o prazo de reset informado pelos headers é limitado ao
+  teto operacional de espera (60 s). Se o servidor indicar um reset maior, o cliente pode
+  voltar a chamar antes do fim do prazo. Nesse caso, o 429 seguinte é tratado por
+  `retry-after`; se `retry-after` passar de 60 s, o lote falha sem novas tentativas e a
+  execução termina incompleta (exit 1), ou abortada (exit 2) se o circuit breaker
+  disparar.
+- **O teto `--max-total-tokens` é best-effort:** usa a chamada anterior + 20% como
+  estimativa, e uma chamada maior que a estimada pode ultrapassá-lo.
+
 ## Estrutura
 
 ```

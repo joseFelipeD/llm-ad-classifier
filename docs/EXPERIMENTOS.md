@@ -131,7 +131,8 @@ a **206**. O controle de ritmo funciona dentro de cada processo e não enxergava
 do E1, que ainda estavam na janela de 60 s do Groq (o E2 começou logo depois). Não houve
 429, mas a margem foi mínima.
 Corrigido depois: o ritmo passou a considerar também os headers de rate limit do Groq
-(commits `0ccc476` e `61c8d4c`). O holdout (E7) já rodou com essa correção.
+(`0ccc476`, 2026-10-14). O holdout (E7, 2026-10-15) rodou com essa versão. O ajuste
+posterior do prazo de reset (`61c8d4c`, 2026-10-16) é **posterior** ao holdout.
 
 Limitações: uma execução por configuração (o modelo não é determinístico); a diferença
 E1 × E2 é de 1 item, dentro do ruído esperado. O `dev_eval` não contém `other`.
@@ -183,6 +184,10 @@ congelada. Nenhum ajuste foi feito com base nele.
   `max_completion_tokens=2048`, `--tpm-limit 6000`. Hash do prompt de sistema
   `e86ce774405004da`, idêntico ao do E1. Prompt, parser, pipeline e CLI sem diff desde o
   commit do E1 (`213da9c`); só o controle de ritmo do cliente mudou (`0ccc476`).
+  **Cronologia:** o holdout rodou em 2026-10-15 com o código do commit `0ccc476`. Os
+  commits `2275535`, `61c8d4c`, `52c54b7` e `0b9fae1` (contabilidade de usage em erros,
+  prazo de reset, circuit breaker, validação de argumentos) são posteriores. Eles não
+  alteram prompt, schema, lote nem parsing; só o tratamento de falhas e de ritmo.
 - Comando:
   ```
   python classify.py splits/holdout.jsonl --tpm-limit 6000 --max-total-tokens 6000     --usage runs/holdout_usage.json --call-log runs/holdout_calls.jsonl > runs/holdout.jsonl

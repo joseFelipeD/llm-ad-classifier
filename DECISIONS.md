@@ -1,7 +1,7 @@
 # DECISIONS
 
 > Documento em construção. Todos os números vêm de execuções reais registradas em
-> `docs/EXPERIMENTOS.md`. Holdout e teste oculto ainda não foram classificados.
+> `docs/EXPERIMENTOS.md`. O teste oculto ainda não foi classificado.
 
 ## Nota sobre o histórico de commits
 
@@ -25,7 +25,14 @@ como exemplo no prompt), uma execução por configuração:
 
 Custo: soma do `usage` real de todas as respostas (`prompt_tokens + completion_tokens`);
 os `reasoning_tokens` já estão dentro de `completion_tokens` e não são somados de novo.
-A estimativa final virá do holdout (40 itens), medido uma única vez.
+**Holdout (40 itens, usado uma única vez com a configuração já congelada):
+97,5% (39/40), macro-F1 0,975, 69,5 tokens/item**. Único erro: "Health insurance plans
+for freelancers…" → finance; o modelo ignorou a exceção da regra 1 (planos de saúde →
+health), embora ela esteja no prompt. Não corrigido, para não ajustar com base no
+holdout. É um risco conhecido para o teste oculto.
+
+O `other` não aparece no treino: o E5 (8 entradas sintéticas) deu 8/8, mas é só um
+teste de sanidade, não uma estimativa.
 
 ## Configuração escolhida: JSON estrito, zero-shot, `reasoning_effort=low`
 
@@ -100,7 +107,7 @@ O candidato aprovou todas. Situação de cada uma:
 | Reforçar a regra do `other` no prompt | **implementada** | descrição de `other` cita markup, placeholder e caracteres aleatórios, e proíbe usá-lo como "não sei" |
 | Testar texto demarcado vs JSON estrito | **implementada e medida** (E1 × E2) | acurácia equivalente; −16% de tokens no texto; mantido JSON pela garantia de formato |
 | Few-shot 1 vs 3 por classe | **infraestrutura pronta, não executada** (`--examples`) | E3/E4 descartados pelo candidato após o E1 (ver "Configuração escolhida") |
-| Captura de `other` | **adaptada** (ver conflito 1) | `synthetic/other_sanity.jsonl`; experimento pendente (E5) |
+| Captura de `other` | **adaptada** (ver conflito 1) e executada (E5) | 8/8 nos sintéticos sem few-shot de lixo; o exemplo sintético extra no prompt não foi necessário. É sanidade, não medição |
 | Experimento de truncamento | **não executado** (ver conflito 3) | — |
 
 ### Conflitos encontrados e como foram resolvidos

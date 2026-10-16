@@ -48,7 +48,7 @@ Modelo base: `openai/gpt-oss-20b`, `--reasoning-effort low`, lote 20.
 
 Avaliação: `python evaluate.py splits/dev_eval.jsonl runs/eN.jsonl runs/eN_usage.json`.
 
-Status: E0, E1 e E2 executados (resultados abaixo). **E3 e E4 não foram executados:**
+Status: E0, E1, E2, E5 e E7 (holdout) executados (resultados abaixo). **E3 e E4 não foram executados:**
 o candidato decidiu não autorizá-los depois do E1 (134/136). O ganho possível, de 1–2
 itens, não seria distinguível do ruído com 136 itens, e o few-shot aumenta o prompt e a
 complexidade. Não há nenhum resultado medido de few-shot. E6 (120B) não foi executado.
@@ -138,3 +138,83 @@ do E1, que ainda estavam na janela de 60 s do Groq (o E2 começou logo depois). 
 
 Limitações: uma execução por configuração (o modelo não é determinístico); a diferença
 E1 × E2 é de 1 item, dentro do ruído esperado. O `dev_eval` não contém `other`.
+
+### E5 — sanidade de `other` com dados sintéticos (2026-10-14, autorizado: 1 chamada)
+
+**É um teste de sanidade, não uma medição de desempenho em `other` no teste oculto.** São
+8 entradas escritas à mão, fáceis e enviadas num lote composto só de anomalias.
+
+- Comando: `python scripts/smoke_test.py synthetic/other_sanity.jsonl --n 8 --out runs/e5`
+  (configuração do E1, sem nenhuma alteração: `gpt-oss-20b`, `low`, JSON estrito,
+  zero-shot; `max_retries=0` e bloqueio de uma segunda chamada).
+- Verificações prévias:
+  - nenhum texto idêntico ao teste; similaridade máxima (difflib) de 0,43;
+  - arquivo commitado em `7d3a3b4`, antes de qualquer chamada à API;
+  - nenhuma predição do teste foi gerada; ids `synNN`.
+  - Ressalva: os *tipos* de anomalia (HTML, placeholder latino, teclado aleatório)
+    foram inspirados pelos perfis vistos ao ler o teste sem rótulos e pela recomendação
+    do Gemini; os textos são diferentes.
+- Tipos de entrada:
+  - markup HTML (`syn01`);
+  - placeholder latino (`syn02`);
+  - teclado aleatório (`syn03`);
+  - variável de template (`syn04`);
+  - entidades HTML escapadas (`syn05`);
+  - pseudopalavras (`syn06`);
+  - só espaços (`syn07`);
+  - frase coerente fora de qualquer categoria (`syn08`).
+- Rotas: 1 tratado localmente (`syn07`, regra de texto vazio) e 7 enviados à API.
+- Resultado: **8/8 `other`** (7/7 pela API, 1/1 local). JSON válido, `finish_reason=stop`,
+  0 problemas.
+- Tokens: entrada 737, saída 90 (reasoning 16), total **827**; 103,4/item sobre os 8, ou
+  118/item sobre os 7 enviados. A média por item é maior que no E1 porque o custo fixo do
+  prompt se dilui em só 7 itens. `usage_exact: true`.
+- Evidência complementar sobre falsos positivos de `other`: no E1, nenhum dos 136 anúncios
+  legítimos do `dev_eval` recebeu `other`.
+- Limitações:
+  - lote homogêneo (no teste, as anomalias vêm misturadas a anúncios normais);
+  - só 1 caso coerente fora de domínio;
+  - nenhum caso em outro idioma ou só com URL/emoji.
+
+### E7 — holdout final (2026-10-15, autorizado: execução única)
+
+O holdout foi usado **uma única vez**, depois de a configuração ter sido escolhida (E1) e
+congelada. Nenhum ajuste foi feito com base nele.
+
+- Configuração congelada (padrões da CLI): `openai/gpt-oss-20b`, `--format json` (JSON
+  Schema estrito), zero-shot, `reasoning_effort=low`, `include_reasoning=false`, lote 20,
+  `max_completion_tokens=2048`, `--tpm-limit 6000`. Hash do prompt de sistema
+  `e86ce774405004da`, idêntico ao do E1. Prompt, parser, pipeline e CLI sem diff desde o
+  commit do E1 (`213da9c`); só o controle de ritmo do cliente mudou (`0ccc476`).
+- Comando:
+  ```
+  python classify.py splits/holdout.jsonl --tpm-limit 6000 --max-total-tokens 6000     --usage runs/holdout_usage.json --call-log runs/holdout_calls.jsonl > runs/holdout.jsonl
+  python evaluate.py splits/holdout.jsonl runs/holdout.jsonl runs/holdout_usage.json
+  ```
+- Resultado (`evaluate.py`): **acurácia de 97,5% (39/40), macro-F1 de 0,975**. Todas as
+  classes 5/5, exceto health 4/5.
+- Único erro: `tr075` "Health insurance plans for freelancers and gig workers" → finance
+  (gold: health). A regra 1 do guia, que está no prompt, diz que planos de saúde são
+  `health`; o modelo aplicou a regra geral de seguros e ignorou a exceção. Não corrigido,
+  por decisão de não ajustar com base no holdout.
+- Tokens: entrada 1.828, saída 951 (dos quais 570 de reasoning, já contidos na saída),
+  total **2.779**, **69,5/item**. Conferência: 910+528 + 918+423 = 2.779, a soma dos
+  `prompt_tokens + completion_tokens` das 2 chamadas, sem somar o reasoning de novo.
+- Requisições: 2, retentativas: 0, falhas de API/parsing/validação: 0,
+  `usage_exact: true`, 2,1 s. Os headers indicavam 5.100–6.240 tokens restantes no
+  minuto, sem espera de ritmo.
+- Integridade:
+  - 40 IDs, cada um uma vez, mesma ordem e conjunto do gabarito; só as chaves `id`/`label`;
+    nenhum label fora da lista; LF, sem CR;
+  - exit 0; MD5 de `data/` inalterado; nenhum padrão de chave nos arquivos gerados.
+- Limitação: com 40 itens, o intervalo de confiança é largo (1 erro = 2,5 p.p.); é uma
+  única execução de um modelo não determinístico.
+
+### Resumo
+
+| | conjunto | rótulos | n | acurácia | macro-F1 | tokens/item |
+|---|---|---|---|---|---|---|
+| E1 (escolhida) | `dev_eval` | treino (reais) | 136 | 98,5% | 0,985 | 70,6 |
+| E2 | `dev_eval` | treino (reais) | 136 | 97,8% | 0,977 | 59,4 |
+| E7 holdout | `holdout` | treino (reais) | 40 | 97,5% | 0,975 | 69,5 |
+| E5 (sanidade) | sintético | escritos à mão | 8 | 8/8 `other` | — | 103,4 (lote de 7) |

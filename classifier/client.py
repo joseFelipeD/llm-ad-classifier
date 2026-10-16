@@ -116,7 +116,7 @@ class GroqClient:
         self._clock = clock
         self._window = deque()      # (instante, tokens) das respostas recentes
         self._last_tokens = 0       # tamanho da última resposta
-        self._server = None         # (tokens restantes, segundos até o reset, instante observado)
+        self._server = None         # (tokens restantes, instante do reset) informados pelo servidor
 
     def complete(self, messages, *, response_format=None, max_completion_tokens=None,
                  reasoning_effort=None):
@@ -163,10 +163,12 @@ class GroqClient:
             message, body = _error_body(e)
             detail = self._redact(message)
             usage = body.get("usage") if isinstance(body, dict) else None
+            tokens = 0
             if usage is not None or e.code not in _REJECTED_BEFORE_GENERATION:
                 # usage válido soma (e conta na janela de TPM); ausente/inválido = consumo desconhecido
-                self._window.append((self._clock(), self.meter.record(usage)))
-            self._observe(e.headers)
+                tokens = self.meter.record(usage)
+                self._window.append((self._clock(), tokens))
+            self._observe(e.headers, tokens)
             self._log_call(started, e.code, usage=usage, error=detail, headers=e.headers)
             if e.code in _FATAL_STATUS:
                 raise ApiError(f"HTTP {e.code}: {detail}", status=e.code, fatal=True) from None
@@ -188,7 +190,7 @@ class GroqClient:
         self._window.append((self._clock(), tokens))
         if tokens:
             self._last_tokens = tokens
-        self._observe(headers)
+        self._observe(headers, tokens)
         try:
             choice = data["choices"][0]
             content = choice["message"].get("content")
@@ -224,22 +226,31 @@ class GroqClient:
             wait = 60 - (now - self._window[0][0]) + 0.5
             log.info("ritmo local: %d tokens no último minuto, aguardando %.1fs", used, wait)
             self._sleep(wait)
-        # 2) estado informado pelo servidor (se houver e ainda for atual)
+        # 2) estado informado pelo servidor, válido até o prazo de reset
         if self._server:
-            remaining, reset, observed = self._server
-            elapsed = self._clock() - observed
-            if elapsed < reset and remaining < estimate:
-                wait = min(reset - elapsed + 0.5, self.max_backoff)
+            remaining, deadline = self._server
+            now = self._clock()
+            if now < deadline and remaining < estimate:
+                wait = deadline - now + 0.5
                 log.info("ritmo servidor: %d tokens restantes < %d estimados, aguardando %.1fs",
                          remaining, estimate, wait)
                 self._sleep(wait)
-            self._server = None  # depois de esperar (ou se já passou o reset), o dado é velho
+                now = self._clock()
+            if now >= deadline:
+                self._server = None  # o limite foi renovado; o dado expirou
 
-    def _observe(self, headers):
-        """Guarda remaining/reset de tokens se ambos forem válidos; senão, descarta."""
+    def _observe(self, headers, used):
+        """Atualiza (tokens restantes, prazo de reset) a partir dos headers, se válidos.
+
+        Sem headers válidos, mantém o prazo já conhecido e só desconta os tokens usados.
+        O prazo é limitado a `max_backoff` (o limite é por minuto)."""
         remaining = _parse_int(headers.get("x-ratelimit-remaining-tokens")) if headers else None
         reset = _parse_duration(headers.get("x-ratelimit-reset-tokens")) if headers else None
-        self._server = (remaining, reset, self._clock()) if remaining is not None and reset is not None else None
+        if remaining is not None and reset is not None:
+            self._server = (remaining, self._clock() + min(reset, self.max_backoff))
+        elif self._server:
+            remaining, deadline = self._server
+            self._server = (max(remaining - used, 0), deadline)
 
     def _log_call(self, started, status, *, usage=None, error=None, headers=None, finish_reason=None):
         usage = usage if isinstance(usage, dict) else {}

@@ -305,8 +305,23 @@ class ServerHeadersTest(unittest.TestCase):
                              (remaining, reset))
 
     def test_wait_is_capped(self):
+        # prazo limitado a max_backoff (60 s) + 0,5 s de folga
         sleeps = self.run_two(response_with_headers(remaining=0, reset="5m"), max_backoff=60)
-        self.assertEqual(sleeps, [60])
+        self.assertEqual(sleeps, [60.5])
+
+    def test_deadline_survives_response_without_headers(self):
+        clock = FakeClock()
+        fake = FakeUrlopen(response_with_headers(remaining=1500, reset="30s"),  # 1000 tokens usados
+                           response_with_headers(),                             # sem headers, +1000
+                           response_with_headers())
+        client = GroqClient("sk-test", "m", urlopen=fake, sleep=clock.sleep, clock=clock)
+        client.complete([])
+        clock.now += 1
+        client.complete([])   # 1500 >= 1200 estimados: não espera, e o prazo continua valendo
+        self.assertEqual(clock.sleeps, [])
+        clock.now += 1
+        client.complete([])   # restam 1500 - 1000 = 500 < 1200: espera até o prazo (t=30)
+        self.assertEqual(clock.sleeps, [28.5])
 
     def test_most_restrictive_applies(self):
         # local: 1000 + 1200 <= 4000 não espera; servidor: 50 restantes -> espera o reset

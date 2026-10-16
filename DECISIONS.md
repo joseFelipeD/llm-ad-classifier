@@ -33,3 +33,7 @@ Preferi sinalizar consumo desconhecido a inventar medições. Outra limitação 
 Com mais tempo, gostaria de ampliar a avaliação para entender melhor como o modelo se comporta em situações menos previsíveis. O principal ponto seria construir um conjunto de exemplos reais da categoria other, que não estava presente nos dados de treinamento, e misturá-los a anúncios das demais categorias para medir os erros de classificação.
 
 Também repetiria alguns experimentos para verificar a consistência dos resultados entre execuções e investigaria os casos ambíguos em que o modelo contrariou as regras do enunciado. Essas melhorias seriam avaliadas com novos dados, sem reutilizar o holdout para ajustar a solução.
+
+## Nota sobre o histórico
+
+A primeira implementação foi escrita antes de qualquer commit e depois organizada em sete commits por responsabilidade (`ee4f230` a `513ce4a`), e não em etapas separadas no tempo. Os commits seguintes são menores, um para cada experimento ou correção.

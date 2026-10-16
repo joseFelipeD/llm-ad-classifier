@@ -30,8 +30,6 @@ Preferi sinalizar consumo desconhecido a inventar medições. Outra limitação 
 
 ## Com mais tempo
 
-Rodaria cada configuração várias vezes para medir a variância, já que o modelo não é determinístico e cada resultado veio de uma única execução. Também montaria um conjunto maior com casos-limite do guia, como seguro implícito, financiamento de produto, carro alugado em viagem e suplemento versus alimento.
+Com mais tempo, gostaria de ampliar a avaliação para entender melhor como o modelo se comporta em situações menos previsíveis. O principal ponto seria construir um conjunto de exemplos reais da categoria other, que não estava presente nos dados de treinamento, e misturá-los a anúncios das demais categorias para medir os erros de classificação.
 
-Para `other`, construiria um conjunto realista, com anomalias misturadas a anúncios normais, para medir recall e falsos positivos. O teste com oito exemplos sintéticos foi apenas uma verificação de sanidade.
-
-Por fim, avaliaria reforçar no prompt as exceções do guia. O único erro do holdout foi "Health insurance plans" classificado como `finance`, quando a regra diz `health`. Não corrigi isso para não ajustar o prompt com base no holdout; essa mudança precisaria ser validada em um conjunto novo.
+Também repetiria alguns experimentos para verificar a consistência dos resultados entre execuções e investigaria os casos ambíguos em que o modelo contrariou as regras do enunciado. Essas melhorias seriam avaliadas com novos dados, sem reutilizar o holdout para ajustar a solução.

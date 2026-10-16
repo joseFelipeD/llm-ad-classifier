@@ -27,3 +27,11 @@ O Gemini sugeriu ajustar o prompt com itens do teste oculto e escolher variantes
 Como a empresa não forneceria chave de API, optei pelo plano gratuito da Groq. Também defini que textos vazios seriam classificados como `other` sem chamada ao modelo, enquanto os demais seguiriam para o LLM. Uma falha definitiva nunca vira um rótulo inventado: o processo sinaliza o erro e não publica um JSONL incompleto como válido. Dentro dos lotes, numerei os anúncios em vez de enviar seus IDs originais, reduzindo tokens e simplificando a associação das respostas.
 
 Preferi sinalizar consumo desconhecido a inventar medições. Outra limitação conhecida é o tratamento de prazos longos de reset da API, que decidi documentar, sem ampliar a implementação para um cenário pouco relevante neste volume de dados.
+
+## Com mais tempo
+
+Rodaria cada configuração várias vezes para medir a variância, já que o modelo não é determinístico e cada resultado veio de uma única execução. Também montaria um conjunto maior com casos-limite do guia, como seguro implícito, financiamento de produto, carro alugado em viagem e suplemento versus alimento.
+
+Para `other`, construiria um conjunto realista, com anomalias misturadas a anúncios normais, para medir recall e falsos positivos. O teste com oito exemplos sintéticos foi apenas uma verificação de sanidade.
+
+Por fim, avaliaria reforçar no prompt as exceções do guia. O único erro do holdout foi "Health insurance plans" classificado como `finance`, quando a regra diz `health`. Não corrigi isso para não ajustar o prompt com base no holdout; essa mudança precisaria ser validada em um conjunto novo.

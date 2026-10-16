@@ -1,6 +1,8 @@
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +11,8 @@ from unittest import mock
 import classify
 from classifier.client import ApiError
 from fakes import FakeClient, as_json
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
 class CliTest(unittest.TestCase):
@@ -100,6 +104,41 @@ class CliTest(unittest.TestCase):
                     self.assertEqual(classify.main([str(src)], stdout=io.StringIO()), 2)
             finally:
                 os.chdir(cwd)
+
+    def test_invalid_numeric_arguments_rejected(self):
+        for args in (["--batch-size", "0"], ["--batch-size", "x"], ["--max-retries", "-1"],
+                     ["--timeout", "0"], ["--timeout", "nan"], ["--tpm-limit", "-5"],
+                     ["--max-total-tokens", "0"], ["--max-completion-tokens", "-1"]):
+            with self.assertRaises(SystemExit) as ctx, mock.patch("sys.stderr", io.StringIO()):
+                classify.main(["in.jsonl", *args], stdout=io.StringIO())
+            self.assertEqual(ctx.exception.code, 2, args)
+
+
+class CliSubprocessTest(unittest.TestCase):
+    """Executa `python classify.py` de verdade (sem rede: falha antes de chamar a API)."""
+
+    def run_script(self, *args, cwd):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GROQ_")}
+        return subprocess.run([sys.executable, str(ROOT / "classify.py"), *args], cwd=cwd, env=env,
+                              capture_output=True, timeout=60)
+
+    def test_missing_key_stdout_empty_error_on_stderr(self):
+        with tempfile.TemporaryDirectory() as tmp:  # sem .env no diretório
+            Path(tmp, "in.jsonl").write_text('{"id": "x", "text": "Cartão"}\n', encoding="utf-8")
+            proc = self.run_script("in.jsonl", cwd=tmp)
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(proc.stdout, b"")
+        self.assertIn("GROQ_API_KEY", proc.stderr.decode("utf-8"))  # stderr em UTF-8
+
+    def test_invalid_input_and_argument(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "dup.jsonl").write_text('{"id": "a", "text": "x"}\n{"id": "a", "text": "y"}\n',
+                                              encoding="utf-8")
+            dup = self.run_script("dup.jsonl", cwd=tmp)
+            bad_arg = self.run_script("dup.jsonl", "--batch-size", "0", cwd=tmp)
+        self.assertEqual((dup.returncode, dup.stdout), (2, b""))
+        self.assertIn("id duplicado", dup.stderr.decode("utf-8"))
+        self.assertEqual((bad_arg.returncode, bad_arg.stdout), (2, b""))
 
 
 if __name__ == "__main__":

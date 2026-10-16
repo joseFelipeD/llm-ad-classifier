@@ -103,6 +103,11 @@ class PipelineTest(unittest.TestCase):
         r = classify_items(items("a"), Truncated(lambda texts, n: ""))
         self.assertIn("finish_reason=length", r.failures["id1"])
 
+    def test_invalid_settings_rejected(self):
+        for kw in ({"batch_size": 0}, {"item_attempts": 0}, {"max_consecutive_errors": -1}):
+            with self.assertRaises(ValueError, msg=kw):
+                classify_items(items("a"), FakeClient(lambda t, n: ""), Settings(**kw))
+
     def test_fatal_error_propagates(self):
         def respond(texts, n):
             raise ApiError("HTTP 401", status=401, fatal=True)

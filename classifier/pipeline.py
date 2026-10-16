@@ -45,8 +45,9 @@ class Result:
 
 def classify_items(items, client, settings=None):
     settings = settings or Settings()
-    if settings.batch_size < 1:
-        raise ValueError("batch_size deve ser >= 1")
+    for name in ("batch_size", "item_attempts", "max_consecutive_errors"):
+        if getattr(settings, name) < 1:
+            raise ValueError(f"{name} deve ser >= 1")
     result = Result()
     pending = []
     for item in items:

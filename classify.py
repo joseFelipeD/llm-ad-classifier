@@ -17,6 +17,7 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import os
 import sys
 import time
@@ -30,26 +31,48 @@ DEFAULT_MODEL = "openai/gpt-oss-20b"
 log = logging.getLogger("classify")
 
 
+def _int_min(minimum):
+    def parse(text):
+        try:
+            value = int(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"inteiro esperado: {text!r}") from None
+        if value < minimum:
+            raise argparse.ArgumentTypeError(f"deve ser >= {minimum}: {value}")
+        return value
+    return parse
+
+
+def _positive_float(text):
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"número esperado: {text!r}") from None
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError(f"deve ser um número > 0: {text}")
+    return value
+
+
 def parse_args(argv):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("input", help="JSONL com {id, text} (campos extras são ignorados)")
     p.add_argument("--model", default=os.environ.get("GROQ_MODEL", DEFAULT_MODEL))
     p.add_argument("--format", choices=FORMATS, default="json",
                    help="json = JSON Schema estrito; lines = texto '<n>|<label>'")
-    p.add_argument("--batch-size", type=int, default=20)
+    p.add_argument("--batch-size", type=_int_min(1), default=20)
     p.add_argument("--examples", help="JSONL {id, text, label} usado como few-shot")
     p.add_argument("--reasoning-effort", default="low",
                    help="low|medium|high para gpt-oss; 'none' para não enviar o parâmetro")
-    p.add_argument("--max-completion-tokens", type=int, default=2048)
-    p.add_argument("--timeout", type=float, default=60.0)
-    p.add_argument("--max-retries", type=int, default=4)
+    p.add_argument("--max-completion-tokens", type=_int_min(1), default=2048)
+    p.add_argument("--timeout", type=_positive_float, default=60.0)
+    p.add_argument("--max-retries", type=_int_min(0), default=4)
     p.add_argument("--usage", help="grava o consumo real de tokens neste arquivo JSON")
     p.add_argument("--failures", help="grava os itens sem label neste arquivo JSONL")
     p.add_argument("--partial", help="em execução incompleta, grava aqui as predições obtidas")
     p.add_argument("--call-log", help="grava um registro JSONL por requisição HTTP (inclusive falhas)")
-    p.add_argument("--tpm-limit", type=int, default=6000,
+    p.add_argument("--tpm-limit", type=_int_min(0), default=6000,
                    help="tokens por minuto a não ultrapassar (plano gratuito do Groq: 8000); 0 desliga")
-    p.add_argument("--max-total-tokens", type=int,
+    p.add_argument("--max-total-tokens", type=_int_min(1),
                    help="teto operacional: não faz chamadas que levariam o total acima disto")
     return p.parse_args(argv)
 
@@ -109,9 +132,6 @@ def main(argv=None, client_factory=GroqClient, stdout=None):
         examples = tuple(load_examples(args.examples)) if args.examples else ()
     except (OSError, InputError) as e:
         log.error("%s", e)
-        return 2
-    if args.batch_size < 1:
-        log.error("--batch-size deve ser >= 1")
         return 2
 
     load_dotenv()

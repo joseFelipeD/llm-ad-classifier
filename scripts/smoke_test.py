@@ -43,7 +43,7 @@ class OneCallClient:
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("input")
-    p.add_argument("--n", type=int, default=20)
+    p.add_argument("--n", type=classify._int_min(1), default=20)
     p.add_argument("--out", default="runs/e0")
     p.add_argument("--model", default="openai/gpt-oss-20b")
     p.add_argument("--format", default="json")

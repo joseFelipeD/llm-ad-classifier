@@ -73,6 +73,20 @@ class PipelineTest(unittest.TestCase):
         self.assertTrue(ctx.exception.fatal)
         self.assertEqual(len(client.calls), 4)
 
+    def test_useless_200_responses_trip_circuit_breaker(self):
+        client = FakeClient(lambda texts, n: "not json at all")
+        with self.assertRaises(ApiError) as ctx:
+            classify_items(items(*"abcdefgh"), client, Settings(max_consecutive_errors=4))
+        self.assertTrue(ctx.exception.fatal)
+        self.assertIn("sem nenhum label válido", str(ctx.exception))
+        self.assertEqual(len(client.calls), 4)  # sem o fix: ~2N chamadas até isolar cada item
+
+    def test_partial_answer_resets_error_counter(self):
+        def respond(texts, n):  # alterna lixo e resposta parcial (com ao menos 1 label)
+            return "lixo" if n % 2 else as_json(["finance"] + [None] * (len(texts) - 1))
+        r = classify_items(items(*"abcd"), FakeClient(respond), Settings(max_consecutive_errors=2))
+        self.assertEqual(len(r.labels) + len(r.failures), 4)
+
     def test_success_resets_error_counter(self):
         def respond(texts, n):
             if n % 2:

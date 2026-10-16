@@ -8,8 +8,8 @@ Política de falhas (nenhuma vira rótulo silenciosamente):
   um item isolado tem `item_attempts` tentativas.
 - API indisponível depois das retentativas do cliente -> itens do lote viram falha.
 - Erro fatal (401/403/404) -> interrompe tudo.
-- `max_consecutive_errors` chamadas seguidas com erro de API (sem nenhuma resposta
-  aproveitável no meio) -> interrompe tudo, em vez de repetir a falha lote a lote
+- `max_consecutive_errors` chamadas seguidas sem nenhum label válido (erro de API ou
+  resposta 200 inútil) -> interrompe tudo, em vez de repetir a falha lote a lote
   (ex.: modelo sem suporte a json_schema, API fora do ar).
 Itens que falham ficam em `failures`, sem label.
 """
@@ -62,6 +62,13 @@ def classify_items(items, client, settings=None):
     return result
 
 
+def _count_error(result, settings, reason, status):
+    result.consecutive_errors += 1
+    if result.consecutive_errors >= settings.max_consecutive_errors:
+        raise ApiError(f"{result.consecutive_errors} chamadas seguidas sem nenhum label válido; "
+                       f"último motivo: {reason}", status=status, fatal=True)
+
+
 def _classify_batch(batch, client, settings, result, attempt):
     try:
         completion = client.complete(
@@ -73,10 +80,7 @@ def _classify_batch(batch, client, settings, result, attempt):
     except ApiError as e:
         if e.fatal:
             raise
-        result.consecutive_errors += 1
-        if result.consecutive_errors >= settings.max_consecutive_errors:
-            raise ApiError(f"{result.consecutive_errors} chamadas seguidas falharam; último erro: {e}",
-                           status=e.status, fatal=True) from e
+        _count_error(result, settings, str(e), e.status)
         if e.retryable:
             # O cliente já esgotou as retentativas: não insistir multiplicando chamadas.
             for it in batch:
@@ -84,12 +88,16 @@ def _classify_batch(batch, client, settings, result, attempt):
             return
         got, reason = {}, str(e)
     else:
-        result.consecutive_errors = 0
         parsed = parse_response(completion.content, settings.fmt, len(batch))
         got = parsed.labels
         reason = "; ".join(parsed.problems) or "item ausente na resposta"
         if completion.finish_reason == "length":
             reason = "resposta cortada (finish_reason=length); " + reason
+        if got:
+            result.consecutive_errors = 0
+        else:
+            # HTTP 200 sem nenhum label válido não é sucesso para o circuit breaker.
+            _count_error(result, settings, reason, None)
 
     for idx, it in enumerate(batch, 1):
         if idx in got:

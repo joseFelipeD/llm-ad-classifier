@@ -10,7 +10,7 @@ from .labels import LABELS
 
 FORMATS = ("json", "lines")
 
-# Categorias e desempates transcritos do guia de rotulagem do README.
+# Categorias e desempates transcritos do guia de rotulagem do enunciado (ENUNCIADO_ORIGINAL.md).
 # A regra de `other` é reforçada (recomendação do Gemini): o LLM julga textos
 # ilegíveis; o código só decide sozinho o caso de texto vazio.
 SYSTEM_PROMPT = """\

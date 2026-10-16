@@ -1,171 +1,103 @@
 # DECISIONS
 
-> Documento em construção. Todos os números vêm de execuções reais registradas em
-> `docs/EXPERIMENTOS.md`. O teste oculto ainda não foi classificado.
-
-## Nota sobre o histórico de commits
-
-A primeira implementação (código, testes e documentação) foi escrita inteira numa única
-sessão, antes de qualquer commit. Os 7 commits seguintes ao commit inicial a registram
-**depois**, agrupada por responsabilidade técnica. Para cada commit compilar e passar
-nos próprios testes, o arquivo de testes de pipeline/CLI/split foi dividido em
-`fakes.py`, `test_pipeline.py`, `test_cli.py` e `test_split.py` antes dos commits. Não
-houve mudança de comportamento: os mesmos 52 testes. Os commits não representam etapas
-de desenvolvimento separadas no tempo.
+Detalhes e comandos de cada experimento: [`docs/EXPERIMENTOS.md`](docs/EXPERIMENTOS.md).
+Como rodar e o que acontece em cada falha: [`README.md`](README.md).
 
 ## Acurácia e custo medidos
 
-Medido com `evaluate.py` no `splits/dev_eval.jsonl` (136 itens do treino que não aparecem
-como exemplo no prompt), uma execução por configuração:
+Groq `openai/gpt-oss-20b`, JSON Schema estrito, zero-shot, `reasoning_effort=low`, lotes
+de 20. Medido com o `evaluate.py` original em partições do treino (split estratificado,
+seed 42), uma execução por configuração:
 
-| configuração | acurácia | macro-F1 | tokens/item |
-|---|---|---|---|
-| E1: JSON Schema estrito, zero-shot, `low` | 98,5% (134/136) | 0,985 | 70,6 |
-| E2: texto `<n>\|<label>`, zero-shot, `low` | 97,8% (133/136) | 0,977 | 59,4 |
+| conjunto | n | acurácia | macro-F1 | tokens/item |
+|---|---|---|---|---|
+| `dev_eval` (escolha da configuração) | 136 | 98,5% | 0,985 | 70,6 |
+| `holdout` (uso único, configuração já congelada) | 40 | **97,5%** | **0,975** | 69,5 |
+| sintético de `other` (sanidade, não é medição) | 8 | 8/8 | — | 103,4 |
 
-Custo: soma do `usage` real de todas as respostas (`prompt_tokens + completion_tokens`);
-os `reasoning_tokens` já estão dentro de `completion_tokens` e não são somados de novo.
-**Holdout (40 itens, usado uma única vez com a configuração já congelada):
-97,5% (39/40), macro-F1 0,975, 69,5 tokens/item**. Único erro: "Health insurance plans
-for freelancers…" → finance; o modelo ignorou a exceção da regra 1 (planos de saúde →
-health), embora ela esteja no prompt. Não corrigido, para não ajustar com base no
-holdout. É um risco conhecido para o teste oculto.
+- **Custo:** soma do `usage` real de todas as respostas da API, inclusive retentativas
+  (`prompt_tokens + completion_tokens`). Os `reasoning_tokens` já vêm dentro de
+  `completion_tokens` (no E0: 364 − 177 = tamanho do JSON visível) e não são somados de
+  novo.
+- **O que não foi medido:** o `other` real, que não existe no treino. Os erros observados
+  foram ambiguidades ("Película automotiva", que em espanhol significa filme; slogan sem
+  produto) e uma exceção do guia ignorada ("Health insurance plans" → finance, quando a
+  regra 1 diz `health`).
 
-O `other` não aparece no treino: o E5 (8 entradas sintéticas) deu 8/8, mas é só um
-teste de sanidade, não uma estimativa.
+## Abordagens tentadas e descartadas
 
-## Configuração escolhida: JSON estrito, zero-shot, `reasoning_effort=low`
-
-- **JSON em vez de texto (E1 × E2):** a diferença de acurácia foi de 1 item, dentro do
-  ruído de uma execução não determinística. O texto economizou cerca de 11 tokens/item
-  (−16%), mas os dois ficam abaixo de 1/5 do orçamento de 400. O JSON Schema estrito
-  restringe os labels ao `enum` no próprio servidor; no formato texto, só o nosso parser
-  protege. Como a economia é irrelevante para o orçamento, ficamos com a garantia de
-  formato.
-- **`low`:** não houve resposta cortada nem erro atribuível a falta de raciocínio. Os
-  erros foram ambiguidades ("Película automotiva", que em espanhol significa filme, e
-  slogans sem produto explícito).
-- **Few-shot (E3/E4) considerado e não executado:** com 134/136 no E1, o ganho possível
-  é de 1–2 itens, indistinguível do ruído com 136 exemplos. Os pools sorteados não
-  têm exemplos do tipo dos erros (eletrônicos/acessórios veiculares), e escolher
-  exemplos de propósito para esses erros seria ajustar o prompt pelo `dev_eval`. O
-  custo seria um prompt maior (+25% a +70% de caracteres no prompt de sistema) e mais
-  complexidade. Nenhum resultado de few-shot foi medido.
-
-## Provedor e arquitetura
-
-- **Provedor:** Groq (API compatível com OpenAI). A empresa não fornece chave nem
-  créditos. O GPT-OSS 20B/120B tem plano gratuito documentado (30 RPM, 1K RPD,
-  8K TPM, 200K TPD por modelo, a confirmar no painel da conta) e JSON Schema estrito
-  com `enum`.
-- **Só a biblioteca padrão** (`urllib`, `unittest`): nada para instalar.
-- **Lotes** (padrão 20 itens): o GPT-OSS sempre raciocina (o mínimo é
-  `reasoning_effort=low`) e o prompt com o guia tem cerca de 2.100 caracteres. Uma
-  chamada por item dificilmente cabe em 400 tokens; em lote, o custo fixo se dilui.
-  Ainda é hipótese, a ser confirmada pelo `usage`.
-- **Os itens vão numerados 1..N no prompt**, não com o id do arquivo: menos tokens, e o
-  modelo não tem como inventar ids. O texto vai como string JSON (aspas e quebras de
-  linha do anúncio não se misturam à lista).
-
-## Política de falhas (nenhuma vira rótulo silenciosamente)
-
-| situação | o que acontece |
-|---|---|
-| texto vazio ou só espaços | `other` por regra explícita do README ("texto vazio"), sem API |
-| HTML, lorem ipsum, lixo | vai para o LLM (o prompt reforça a regra do `other`) |
-| JSON malformado, label inválido, item ausente ou conflitante | só os itens sem label válido são reenviados; um lote sem nada aproveitável é dividido ao meio; item isolado: 2 tentativas |
-| 429 / 408 / 5xx / timeout / erro de rede ou de leitura (SSL, `IncompleteRead`) | o cliente repete até 4 vezes (`retry-after` ou backoff exponencial, teto de 60 s); se esgotar, o lote vira falha, sem multiplicar chamadas |
-| `retry-after` maior que 60 s (ex.: cota diária) | desiste na hora, em vez de gastar as tentativas |
-| risco de passar do limite de tokens por minuto | antes de cada chamada, estima o consumo (chamada anterior + 20%) e espera se: (a) a janela local de 60 s passaria de `--tpm-limit` (padrão 6000), ou (b) o servidor informou (`x-ratelimit-remaining-tokens`/`-reset-tokens`) menos tokens restantes que a estimativa. Headers ausentes ou inválidos são ignorados. Como é uma estimativa, não há garantia absoluta; um 429 continua tratado por retry-after/backoff. Motivo: no E2, o controle só local deixou o servidor com 206 tokens restantes |
-| 400 (ex.: validação de JSON) | tratado como resposta ruim: divide o lote e tenta de novo |
-| 4 chamadas seguidas com erro de API, sem nenhuma resposta aproveitável | aborta (código 2), em vez de repetir a falha em todos os lotes (circuit breaker) |
-| 401 / 403 / 404 | aborta tudo (código 2) |
-| entrada inválida (JSON, id ausente/duplicado, sem `text`) | aborta antes da API (código 2) |
-| exceção inesperada | aborta (código 2), mas grava o `usage.json` com `aborted: true` |
-
-Se **qualquer** item falhar, o **stdout fica vazio** e o processo termina com código 1.
-Assim, um `> predictions.jsonl` incompleto não fica parecendo um entregável válido. As
-falhas vão para o stderr e para `--failures`; as predições obtidas, para `--partial`
-(para não desperdiçar tokens já pagos ao diagnosticar).
-
-Tokens: somamos `prompt_tokens + completion_tokens` de **todas** as respostas,
-inclusive retentativas e respostas 200 malformadas que tragam `usage`. Nada é estimado.
-Respostas sem `usage` e falhas de transporte são contadas à parte e deixam
-`usage_exact: false` no `usage.json`. A média é calculada sobre todos os itens da
-entrada, inclusive os vazios, que custam 0.
-
-## Recomendações do Gemini (revisão independente, `docs/RECOMENDACOES_GEMINI.md`)
-
-O candidato aprovou todas. Situação de cada uma:
-
-| recomendação | situação | como |
-|---|---|---|
-| Split 80/20 (160/40) em vez de 50/50 | **implementada** | `scripts/make_split.py`, estratificado, seed 42, testado |
-| Só stdlib / `urllib` | **implementada** | `classifier/client.py` |
-| Não truncar textos longos | **implementada** | o texto vai integral; teste `test_long_text_is_not_truncated` |
-| Atalho determinístico só para texto vazio/espaços | **implementada** | `classifier/pipeline.py`; HTML continua indo ao LLM (teste) |
-| Reforçar a regra do `other` no prompt | **implementada** | descrição de `other` cita markup, placeholder e caracteres aleatórios, e proíbe usá-lo como "não sei" |
-| Testar texto demarcado vs JSON estrito | **implementada e medida** (E1 × E2) | acurácia equivalente; −16% de tokens no texto; mantido JSON pela garantia de formato |
-| Few-shot 1 vs 3 por classe | **infraestrutura pronta, não executada** (`--examples`) | E3/E4 descartados pelo candidato após o E1 (ver "Configuração escolhida") |
-| Captura de `other` | **adaptada** (ver conflito 1) e executada (E5) | 8/8 nos sintéticos sem few-shot de lixo; o exemplo sintético extra no prompt não foi necessário. É sanidade, não medição |
-| Experimento de truncamento | **não executado** (ver conflito 3) | — |
-
-### Conflitos encontrados e como foram resolvidos
-
-1. **Enviar os 4 itens anômalos do teste à API e ajustar o prompt conforme o resultado.**
-   Isso seria ajustar o prompt usando o teste oculto, o que o contrato do projeto
-   proíbe. Substituímos por 8 entradas sintéticas escritas à mão, com perfis
-   equivalentes mas textos diferentes, num arquivo separado e marcado como sintético.
-2. **Comparar as variantes de few-shot "contra o holdout de 40".** Escolher configuração
-   pelo holdout o transforma em conjunto de validação, e a estimativa final fica
-   otimista. As variantes são comparadas no `dev_eval` (136 itens, sem nenhum exemplo do
-   prompt); o holdout é medido uma vez, no fim.
-3. **Truncar os 5 textos mais longos do treino em 100/200 caracteres.** O texto mais
-   longo do treino tem 62 caracteres, então o experimento não alteraria nada. Como a
-   própria recomendação final é não truncar, seguimos essa decisão sem gastar chamadas.
+- **Uma chamada por item:** descartada antes de medir. O GPT-OSS sempre raciocina e o
+  prompt com o guia é grande (o E5, com 7 itens curtos, usou 737 tokens de entrada).
+  Uma chamada por item mal caberia em 400 tokens; em lote de 20, o custo fixo se dilui
+  (~70/item medido).
+- **Formato texto `<n>|<label>` (E2):** 97,8% e −16% de tokens, mas a diferença de
+  acurácia foi de 1 item (ruído) e o orçamento já tinha folga de ~6×. Ficamos com o
+  JSON Schema estrito, cujo `enum` impede labels inválidos no próprio servidor.
+- **Few-shot com 1 ou 3 exemplos por classe (E3/E4):** infraestrutura pronta, mas não
+  executados. Com 134/136, o ganho possível era indistinguível do ruído; e escolher
+  exemplos para os erros observados seria ajustar o prompt pelo conjunto de validação.
+- **`reasoning_effort` medium e o modelo 120B:** não testados; nada indicava falta de
+  raciocínio (nenhuma resposta cortada; os erros eram de ambiguidade).
+- **Truncar textos longos:** não; o maior item tem 539 caracteres, custo irrelevante.
 
 ## Onde a IA ajudou e onde errou
 
-- **Claude Code (implementação):** gerou a estrutura, o cliente, o pipeline e 40 testes
-  offline. Erros percebidos e corrigidos antes de qualquer commit:
-  - a primeira versão do backoff esperava sempre o mesmo tempo, com um comentário que
-    admitia a aproximação. Reescrito como exponencial por tentativa, com teste;
-  - numa execução abortada, o `usage.json` informaria "1 item falhou", o que era falso.
-    Trocado por `aborted: true` e `items_failed: null`;
-  - um teste continha uma asserção sem efeito (expressão condicional sempre falsa),
-    corrigida;
-  - no Windows, os logs saíam em cp1252 e o stdout com CRLF. A CLI agora força UTF-8 e
-    `\n`;
-  - ao aplicar as correções da auditoria por script, o `\n` dentro de strings virou
-    quebra de linha literal e deixou o arquivo com erro de sintaxe. Detectado na
-    releitura, antes de rodar os testes, e corrigido.
-- **Subagente `auditor-robustez` (Claude, somente leitura):** auditou a primeira versão e
-  apontou problemas reais que os 40 testes não pegavam. Todos foram aceitos e cobertos
-  por testes novos (52 no total):
-  - `IncompleteRead`/SSL derrubariam o processo sem gravar o usage;
-  - o stdout recebia predições parciais mesmo com exit 1;
-  - um 400/404 de configuração geraria cerca de 2N chamadas inúteis (agora: 404 fatal
-    + circuit breaker);
-  - `retry-after: nan` causaria exceção, e um `retry-after` longo gastaria tentativas em
-    vão;
-  - o `usage` era ignorado em respostas 200 malformadas;
-  - a chave não era mascarada nas mensagens de erro.
+Fluxo: Claude Code implementou e rodou os testes; o Gemini revisou o plano; o Codex e
+um subagente do Claude (`auditor-robustez`) auditaram o código sem editá-lo; eu aprovei
+cada etapa, cada gasto de API e cada commit.
 
-  Não adotado: registrar "chamadas lógicas" além de `http_attempts`, por ser
-  redundante para o requisito.
-- **Gemini (revisão do plano):** propôs o split 80/20, não truncar e o formato de texto
-  como alternativa ao JSON. Errou ao sugerir usar itens do teste e o holdout para
-  calibração, e propôs um experimento de truncamento sem efeito nestes dados (ver
-  conflitos).
+- **Ajudou:** diagnóstico dos dados, estrutura com stdlib, 78 testes offline, controle
+  de consumo e registro de cada experimento.
+- **Claude errou, e o erro foi corrigido antes do commit:**
+  - backoff fixo em vez de exponencial;
+  - `usage.json` dizendo "1 item falhou" num abort;
+  - uma asserção de teste sem efeito;
+  - CRLF/cp1252 no Windows;
+  - um script de edição que inseriu quebras de linha literais em strings.
+- **Erros que só as auditorias pegaram:**
+  - `auditor-robustez`: `IncompleteRead`/SSL derrubariam o processo; predições parciais
+    iam para o stdout com exit 1; um erro de configuração geraria ~2N chamadas inúteis;
+    `retry-after: nan` causava exceção.
+  - Codex: o circuit breaker tratava uma resposta 200 sem label válido como sucesso; o
+    prazo de reset dos headers era descartado cedo demais; `True` e valores negativos
+    passavam como contagem de tokens; o `usage` de erros HTTP era ignorado.
+- **Erro que só a execução real revelou:** o controle de ritmo por processo não via o
+  consumo da execução anterior. O servidor chegou a informar só 206 tokens restantes no
+  minuto. Corrigido usando os headers de rate limit.
+- **Gemini:** acertou o split 80/20 e a ideia de comparar texto vs JSON. Errou ao sugerir
+  calibrar o prompt com itens do teste oculto e escolher variantes pelo holdout, e
+  propôs um experimento de truncamento sem efeito nestes dados (máx. 62 caracteres no
+  treino). As três sugestões foram adaptadas ou descartadas.
 
-## Decisões não cobertas pelo enunciado
+## Decisões que tomei sem o enunciado cobrir
 
-- Texto vazio vira `other` sem API; qualquer outro texto passa pelo LLM.
-- Labels com maiúsculas ou espaços (" Finance ") são normalizados; qualquer outro label
-  fora da lista é rejeitado.
-- Duas respostas diferentes para o mesmo item no mesmo lote: as duas são descartadas e o
-  item é reenviado.
+- **Provedor:** a empresa não forneceu chave. Usei o plano gratuito do Groq (1.000
+  req/dia, 8.000 tokens/min confirmados nos headers da conta).
+- **Texto vazio ou só espaços → `other` sem chamar a API** (regra literal do enunciado).
+  HTML, lorem ipsum e lixo vão para o LLM, com a regra de `other` reforçada no prompt.
+- **Falha nunca vira rótulo.** Se qualquer item ficar sem label, o stdout fica vazio e o
+  exit é 1, para que um `> predictions.jsonl` incompleto não pareça entregável; as
+  predições parciais vão para `--partial`.
+- **Consumo desconhecido nunca é estimado:** fica marcado com `usage_exact: false`.
+  Limitação: se um timeout ocorrer depois de o servidor processar o pedido, esses tokens
+  não aparecem na soma. A flag sinaliza isso, mas não o corrige.
+- **Os itens vão numerados 1..N no prompt, não com o id:** menos tokens, e o modelo não
+  inventa ids.
+- **Labels com maiúsculas ou espaços são normalizados;** duas respostas diferentes para
+  o mesmo item são descartadas e o item é reenviado.
 
 ## Com mais tempo
 
-Pendente, a preencher após os experimentos.
+- Medir a variância (várias execuções) e um conjunto maior com casos-limite do guia,
+  como seguro implícito, financiamento de produto, carro alugado em viagem e
+  suplemento vs alimento.
+- Construir um conjunto de `other` realista, misturado a anúncios normais, para medir
+  recall e falsos positivos.
+- Avaliar o reforço das exceções do guia no prompt (o erro do holdout), validando num
+  conjunto novo para não contaminar a estimativa atual.
+
+## Nota sobre o histórico
+
+A primeira implementação foi escrita antes de qualquer commit e registrada depois em 7
+commits por responsabilidade (`ee4f230`..`513ce4a`), não em etapas separadas no tempo.
+Os commits seguintes são incrementais e acompanham cada experimento e correção.

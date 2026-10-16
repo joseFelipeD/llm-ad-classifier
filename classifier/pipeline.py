@@ -1,7 +1,7 @@
 """Classificação em lotes com recuperação de respostas parciais.
 
 Política de falhas (nenhuma vira rótulo silenciosamente):
-- Texto vazio ou só espaços -> `other` por regra explícita do README, sem API.
+- Texto vazio ou só espaços -> `other` por regra explícita do enunciado (ENUNCIADO_ORIGINAL.md), sem API.
   Qualquer outro texto (inclusive HTML ou lorem ipsum) vai para o LLM.
 - Resposta com itens faltando, label inválido ou JSON quebrado -> os itens sem
   label válido são reenviados (lote dividido ao meio se nada foi aproveitado);

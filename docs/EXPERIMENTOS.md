@@ -2,7 +2,7 @@
 
 Todos os números desta página vêm de execuções reais (saída de `evaluate.py` e
 `usage.json`). Os arquivos brutos de cada execução (`runs/`) ficam locais e não são
-versionados. O teste oculto ainda não foi classificado.
+versionados. O teste oculto foi classificado uma única vez (seção "Execução final").
 
 ## Partições (geradas por `python scripts/make_split.py`, seed 42)
 
@@ -220,3 +220,36 @@ congelada. Nenhum ajuste foi feito com base nele.
 | E2 | `dev_eval` | treino (reais) | 136 | 97,8% | 0,977 | 59,4 |
 | E7 holdout | `holdout` | treino (reais) | 40 | 97,5% | 0,975 | 69,5 |
 | E5 (sanidade) | sintético | escritos à mão | 8 | 8/8 `other` | — | 103,4 (lote de 7) |
+
+### Execução final — 100 anúncios do teste (2026-10-16, autorizada: execução única)
+
+- Configuração congelada (padrões da CLI): `openai/gpt-oss-20b`, JSON Schema estrito,
+  zero-shot, `reasoning_effort=low`, lote 20, `max_completion_tokens=2048`,
+  `--tpm-limit 6000`; hash do prompt `e86ce774405004da`; código no commit `92e2c28`.
+- Comando: a saída foi gravada primeiro em `runs/` e copiada para a raiz só depois de
+  validada, para que um arquivo incompleto nunca parecesse entrega.
+  ```
+  python classify.py data/test_unlabeled.jsonl --usage runs/final_usage.json     --call-log runs/final_calls.jsonl --failures runs/final_failures.jsonl     --partial runs/final_partial.jsonl --max-total-tokens 20000 > runs/final_predictions.jsonl
+  ```
+- Resultado: exit 0, 100/100 itens (1 texto vazio → `other` localmente, 99 via API em 5
+  lotes), 63,2 s.
+- Requisições: 7. Seis respostas 200 e um **HTTP 400** do servidor no 4º lote: "Generated
+  JSON does not match the expected schema … `/labels/7/i` … expected integer, but got
+  string". A política funcionou como previsto: o lote foi dividido em 2×10 e os dois
+  tiveram sucesso. Nenhum 429, nenhuma falha de transporte, nenhum item sem label.
+- Tokens (`usage.json`): entrada 5.296, saída 2.266 (1.305 de reasoning, já contidos na
+  saída), total 7.562, **75,6/item**. Os valores batem com a soma do log de chamadas.
+- **`usage_exact: false`**: a resposta 400 não trouxe `usage`. O modelo gerou tokens nessa
+  tentativa, mas o consumo dela não pôde ser medido; 75,6 é um piso.
+  - Limite superior calculado (não medido): prompt de um lote de 20 ≤ ~1.100 tokens (as
+    outras chamadas tiveram 904–1.025) + saída ≤ `max_completion_tokens` 2.048 → total
+    ≤ ~10.700, ou seja **≤ ~107 tokens/item**, ainda abaixo de 400.
+  - Indício (não medição): os headers de rate limit caíram de 4.036 para 2.874 tokens
+    restantes em torno dessa tentativa.
+- Validação de `predictions.jsonl`:
+  - 100 linhas JSON, UTF-8 sem BOM, LF;
+  - só `id`/`label`; IDs idênticos ao arquivo original e na mesma ordem; sem duplicados;
+  - labels apenas entre os 9; nenhuma linha de log.
+- Distribuição das predições (não é acurácia): automotive 13, technology 13, health 13,
+  food_beverage 12, finance 12, entertainment 12, fashion 11, travel 10, other 4.
+- Arquivos: `predictions.jsonl` e `usage.json` versionados; `runs/final_*` ficam locais.

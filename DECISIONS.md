@@ -14,11 +14,18 @@ seed 42), uma execução por configuração:
 | `dev_eval` (escolha da configuração) | 136 | 98,5% | 0,985 | 70,6 |
 | `holdout` (uso único, configuração já congelada) | 40 | **97,5%** | **0,975** | 69,5 |
 | sintético de `other` (sanidade, não é medição) | 8 | 8/8 | — | 103,4 |
+| **teste (100 anúncios, entrega)** | 100 | desconhecida (sem gabarito) | — | **75,6** (piso; ver abaixo) |
 
 - **Custo:** soma do `usage` real de todas as respostas da API, inclusive retentativas
   (`prompt_tokens + completion_tokens`). Os `reasoning_tokens` já vêm dentro de
   `completion_tokens` (no E0: 364 − 177 = tamanho do JSON visível) e não são somados de
   novo.
+- **Execução final:** 7 requisições, sem nenhum item sem label. Um lote recebeu HTTP 400
+  do servidor (o modelo devolveu um índice como string, fora do schema); o lote foi
+  dividido em 2×10 e reclassificado com sucesso. Essa tentativa não informou `usage`,
+  então `usage_exact` é `false`: 75,6 tokens/item é um piso. O pior caso calculado
+  (prompt + `max_completion_tokens` da tentativa perdida) é ≤ ~107/item, ainda abaixo
+  de 400.
 - **O que não foi medido:** o `other` real, que não existe no treino. Os erros observados
   foram ambiguidades ("Película automotiva", que em espanhol significa filme; slogan sem
   produto) e uma exceção do guia ignorada ("Health insurance plans" → finance, quando a

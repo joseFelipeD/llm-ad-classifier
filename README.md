@@ -13,8 +13,13 @@ estrito, prompt zero-shot com o guia de desempates e tratamento explícito de fa
 | `dev_eval` (escolha da configuração) | 136 | 98,5% | 0,985 | 70,6 |
 | `holdout` (uso único, configuração congelada) | 40 | 97,5% | 0,975 | 69,5 |
 
-> **Estado:** `predictions.jsonl` e `usage.json` dos 100 anúncios de teste ainda não foram
-> gerados; serão produzidos pelo comando de [Executar](#executar) na etapa final.
+> **Estado: concluído.** [`predictions.jsonl`](predictions.jsonl) e [`usage.json`](usage.json)
+> foram gerados em 2026-10-16, numa única execução bem-sucedida sobre os 100 anúncios de
+> teste: 100 predições, 7 requisições, **75,6 tokens/item** (5.296 entrada + 2.266 saída).
+> `usage_exact: false`: uma tentativa rejeitada com HTTP 400 (JSON fora do schema) não
+> informou `usage`. A média é um piso; o pior caso calculado é ≤ ~107 tokens/item (ver
+> [`docs/EXPERIMENTOS.md`](docs/EXPERIMENTOS.md)). A acurácia no teste é desconhecida
+> (sem gabarito).
 
 ## Requisitos
 
